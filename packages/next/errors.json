@@ -1087,5 +1087,16 @@
   "1086": "Route \"%s\": %s This delays the entire page from rendering, resulting in a slow user experience. Learn more: https://nextjs.org/docs/messages/next-prerender-dynamic-viewport",
   "1087": "Failed to parse \"%s\":\\n%s%s",
   "1088": "Expected RSC navigation response to have a body",
-  "1089": "\\`experimental.cachedNavigations\\` requires \\`cacheComponents\\` to be enabled. Please update your %s accordingly."
+  "1089": "\\`experimental.cachedNavigations\\` requires \\`cacheComponents\\` to be enabled. Please update your %s accordingly.",
+  "1090": "Worker pool is ending, no more calls can be made",
+  "1091": "Worker exited with code %s%s",
+  "1092": "This file must be run as a worker thread",
+  "1093": "Worker pool closed",
+  "1094": "Child can only be used on a forked process",
+  "1095": "Error when calling setup: %s",
+  "1096": "Worker pool ended before task could be processed",
+  "1097": "\"null\" or \"undefined\" thrown",
+  "1098": "Unexpected request from parent process: %s",
+  "1099": "Worker exited unexpectedly with code %s, signal %s",
+  "1100": "Worker restarted due to timeout"
 }
