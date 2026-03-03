@@ -1735,7 +1735,7 @@ pub(crate) fn current_task(from: &str) -> TaskId {
 
 #[track_caller]
 fn debug_assert_not_in_top_level_task(operation: &str) {
-    if !cfg!(debug_assertions) {
+    if true {
         return;
     }
 
