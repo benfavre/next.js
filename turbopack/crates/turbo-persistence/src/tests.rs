@@ -116,11 +116,34 @@ fn open_db<const F: usize>(
     path: &std::path::Path,
     mmap: bool,
 ) -> Result<TurboPersistence<RayonParallelScheduler, F>> {
+    open_db_with_config(path, config_with_mmap(mmap))
+}
+
+fn open_db_with_config<const F: usize>(
+    path: &std::path::Path,
+    config: DbConfig<F>,
+) -> Result<TurboPersistence<RayonParallelScheduler, F>> {
     TurboPersistence::open_with_config_and_parallel_scheduler(
         path.to_path_buf(),
-        config_with_mmap(mmap),
+        config,
         RayonParallelScheduler,
     )
+}
+
+fn multi_value_config_with_mmap(mmap: bool) -> DbConfig<1> {
+    DbConfig {
+        family_configs: [FamilyConfig {
+            kind: FamilyKind::MultiValue,
+        }],
+        mmap,
+    }
+}
+
+fn open_multi_value_db(
+    path: &std::path::Path,
+    mmap: bool,
+) -> Result<TurboPersistence<RayonParallelScheduler, 1>> {
+    open_db_with_config(path, multi_value_config_with_mmap(mmap))
 }
 
 #[rstest]
@@ -1434,15 +1457,6 @@ fn many_medium_values_compaction(#[case] mmap: bool) -> Result<()> {
     Ok(())
 }
 
-fn multi_value_config_with_mmap(mmap: bool) -> DbConfig<1> {
-    DbConfig {
-        family_configs: [FamilyConfig {
-            kind: FamilyKind::MultiValue,
-        }],
-        mmap,
-    }
-}
-
 #[rstest]
 #[case(true)]
 #[case(false)]
@@ -1450,16 +1464,10 @@ fn compaction_multi_value_preserves_different_values(#[case] mmap: bool) -> Resu
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
-
     let key = vec![42u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config,
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write same key with different values in separate batches
         let batch = db.write_batch()?;
@@ -1506,16 +1514,10 @@ fn compaction_multi_value_multiple_compactions(#[case] mmap: bool) -> Result<()>
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
-
     let key = vec![42u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write initial values
         for value in [1u8, 2, 3] {
@@ -1565,11 +1567,7 @@ fn compaction_multi_value_multiple_compactions(#[case] mmap: bool) -> Result<()>
 
     // Reopen and verify persistence
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config,
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         let results = db.get_multiple(0, &key.as_slice())?;
         assert_eq!(results.len(), 6, "Should still have 6 values after reopen");
@@ -1587,15 +1585,10 @@ fn multi_value_delete_key(#[case] mmap: bool) -> Result<()> {
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
     let key = vec![42u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write multiple values for the same key across separate batches
         for value in [1u8, 2, 3] {
@@ -1634,11 +1627,7 @@ fn multi_value_delete_key(#[case] mmap: bool) -> Result<()> {
 
     // Reopen and verify deletion persists
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config,
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         let results = db.get_multiple(0, &key.as_slice())?;
         assert!(
@@ -1659,15 +1648,10 @@ fn multi_value_delete_then_rewrite(#[case] mmap: bool) -> Result<()> {
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
     let key = vec![42u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write initial values
         for value in [1u8, 2, 3] {
@@ -1720,11 +1704,7 @@ fn multi_value_delete_then_rewrite(#[case] mmap: bool) -> Result<()> {
 
     // Reopen and verify
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config,
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         let results = db.get_multiple(0, &key.as_slice())?;
         assert_eq!(results.len(), 2, "Should have 2 values after reopen");
@@ -1749,15 +1729,10 @@ fn multi_value_delete_with_compaction_interleaved(#[case] mmap: bool) -> Result<
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
     let key = vec![42u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write values 1, 2
         for value in [1u8, 2] {
@@ -1814,11 +1789,7 @@ fn multi_value_delete_with_compaction_interleaved(#[case] mmap: bool) -> Result<
 
     // Reopen and verify
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config,
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         let results = db.get_multiple(0, &key.as_slice())?;
         assert_eq!(results.len(), 1, "Should have only value 4 after reopen");
@@ -1863,18 +1834,12 @@ fn multi_value_tombstone_only_shadows_older_ssts(#[case] mmap: bool) -> Result<(
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
-
     // For MultiValue, a tombstone only shadows entries from older SSTs.
     // Entries in the same batch are NOT shadowed by the tombstone.
     let key = vec![3u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // First write an older value in a separate batch (separate SST)
         let batch = db.write_batch()?;
@@ -1914,17 +1879,11 @@ fn multi_value_tombstone_shadows_older_sst_only(#[case] mmap: bool) -> Result<()
     let tempdir = tempfile::tempdir()?;
     let path = tempdir.path();
 
-    let config = multi_value_config_with_mmap(mmap);
-
     // For MultiValue, tombstone in a batch shadows only entries from older SSTs.
     let key = vec![4u8];
 
     {
-        let db = TurboPersistence::<_, 1>::open_with_config_and_parallel_scheduler(
-            path.to_path_buf(),
-            config.clone(),
-            RayonParallelScheduler,
-        )?;
+        let db = open_multi_value_db(path, mmap)?;
 
         // Write an older value in a separate batch
         let batch = db.write_batch()?;

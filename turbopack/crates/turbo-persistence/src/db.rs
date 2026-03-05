@@ -181,7 +181,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         mut config: DbConfig<FAMILIES>,
     ) -> Self {
         // Allow the env var to override even const-constructed configs.
-        if std::env::var("TURBO_PERSISTENCE_MMAP").as_deref() == Ok("0") {
+        if !crate::mmap_env_var() {
             config.mmap = false;
         }
         Self {

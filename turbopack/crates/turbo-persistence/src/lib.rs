@@ -75,15 +75,19 @@ impl<const FAMILIES: usize> DbConfig<FAMILIES> {
     }
 }
 
+/// Reads the `TURBO_PERSISTENCE_MMAP` env var. Returns `false` when the var is set to `"0"`,
+/// `true` otherwise.
+fn mmap_env_var() -> bool {
+    std::env::var("TURBO_PERSISTENCE_MMAP")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
 impl<const FAMILIES: usize> Default for DbConfig<FAMILIES> {
     fn default() -> Self {
         Self {
-            family_configs: [FamilyConfig {
-                kind: FamilyKind::SingleValue,
-            }; FAMILIES],
-            mmap: std::env::var("TURBO_PERSISTENCE_MMAP")
-                .map(|v| v != "0")
-                .unwrap_or(true),
+            mmap: mmap_env_var(),
+            ..Self::new()
         }
     }
 }
