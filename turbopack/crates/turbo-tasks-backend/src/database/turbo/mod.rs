@@ -57,6 +57,7 @@ impl TurboKeyValueDatabase {
                 KeySpace::TaskData.family_config(),
                 KeySpace::TaskCache.family_config(),
             ],
+            ..DbConfig::new()
         };
         let db = Arc::new(TurboPersistence::open_with_config(versioned_path, CONFIG)?);
         Ok(Self {

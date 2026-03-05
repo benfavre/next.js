@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     fs::File,
     hash::BuildHasherDefault,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -134,33 +135,79 @@ impl StaticSortedFileMetaData {
     }
 }
 
-/// A memory mapped SST file.
+/// Reads exactly `buf.len()` bytes from `file` at the given offset, without changing the file's
+/// seek position.
+pub(crate) fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut pos = 0;
+        while pos < buf.len() {
+            let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected eof in pread",
+                ));
+            }
+            pos += n;
+        }
+        Ok(())
+    }
+}
+
+/// The backing storage for an SST file: either a memory-mapped region or a plain file handle.
+enum StaticSortedFileBacking {
+    Mmap {
+        /// The memory mapped file. Stored as an Arc so we can hand out references
+        /// (via ArcBytes) that can outlive this struct.
+        mmap: Arc<Mmap>,
+    },
+    File {
+        /// The file handle, shared via Arc for ArcBytes references.
+        file: Arc<File>,
+        /// The file length in bytes (cached at open time).
+        file_len: usize,
+        /// Block offset table read into memory at open time.
+        /// `block_offsets[i]` is the end offset of block `i` (in bytes from file start).
+        block_offsets: Vec<u32>,
+    },
+}
+
+/// An SST file backed by either mmap or direct file reads.
 pub struct StaticSortedFile {
     /// The meta file of this file.
     meta: StaticSortedFileMetaData,
-    /// The memory mapped file.
-    /// We store as an Arc so we can hand out references (via ArcBytes) that can outlive this
-    /// struct (not that we expect them to outlive it by very much)
-    mmap: Arc<Mmap>,
+    /// The backing storage.
+    backing: StaticSortedFileBacking,
 }
 
 impl StaticSortedFile {
-    /// Opens an SST file at the given path. This memory maps the file, but does not read it yet.
-    /// It's lazy read on demand.
-    pub fn open(db_path: &Path, meta: StaticSortedFileMetaData) -> Result<Self> {
+    /// Opens an SST file at the given path. This memory maps the file (or opens it for direct
+    /// reads if `use_mmap` is false), but does not read block data yet — it's lazy read on demand.
+    pub fn open(db_path: &Path, meta: StaticSortedFileMetaData, use_mmap: bool) -> Result<Self> {
         let filename = format!("{:08}.sst", meta.sequence_number);
         let path = db_path.join(&filename);
-        Self::open_internal(path, meta, false)
+        Self::open_internal(path, meta, false, use_mmap)
             .with_context(|| format!("Unable to open static sorted file {filename}"))
     }
 
     /// Opens an SST file for compaction. Uses MADV_SEQUENTIAL instead of MADV_RANDOM,
     /// since compaction reads blocks sequentially and benefits from OS read-ahead
     /// and page reclamation.
-    pub fn open_for_compaction(db_path: &Path, meta: StaticSortedFileMetaData) -> Result<Self> {
+    pub fn open_for_compaction(
+        db_path: &Path,
+        meta: StaticSortedFileMetaData,
+        use_mmap: bool,
+    ) -> Result<Self> {
         let filename = format!("{:08}.sst", meta.sequence_number);
         let path = db_path.join(&filename);
-        Self::open_internal(path, meta, true)
+        Self::open_internal(path, meta, true, use_mmap)
             .with_context(|| format!("Unable to open static sorted file {filename}"))
     }
 
@@ -168,30 +215,54 @@ impl StaticSortedFile {
         path: PathBuf,
         meta: StaticSortedFileMetaData,
         sequential: bool,
+        use_mmap: bool,
     ) -> Result<Self> {
         let file = File::open(&path)
             .with_context(|| format!("Failed to open SST file {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
-            format!(
-                "Failed to mmap SST file {} ({} bytes)",
-                path.display(),
-                file.metadata().map(|m| m.len()).unwrap_or(0)
-            )
-        })?;
-        #[cfg(unix)]
-        if sequential {
-            mmap.advise(memmap2::Advice::Sequential)?;
+
+        let backing = if use_mmap {
+            let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
+                format!(
+                    "Failed to mmap SST file {} ({} bytes)",
+                    path.display(),
+                    file.metadata().map(|m| m.len()).unwrap_or(0)
+                )
+            })?;
+            #[cfg(unix)]
+            if sequential {
+                mmap.advise(memmap2::Advice::Sequential)?;
+            } else {
+                mmap.advise(memmap2::Advice::Random)?;
+                let offset = meta.block_offsets_start(mmap.len());
+                let _ = mmap.advise_range(memmap2::Advice::Sequential, offset, mmap.len() - offset);
+            }
+            advise_mmap_for_persistence(&mmap)?;
+            StaticSortedFileBacking::Mmap {
+                mmap: Arc::new(mmap),
+            }
         } else {
-            mmap.advise(memmap2::Advice::Random)?;
-            let offset = meta.block_offsets_start(mmap.len());
-            let _ = mmap.advise_range(memmap2::Advice::Sequential, offset, mmap.len() - offset);
-        }
-        advise_mmap_for_persistence(&mmap)?;
-        let file = Self {
-            meta,
-            mmap: Arc::new(mmap),
+            let file_len = file.metadata()?.len() as usize;
+            let block_count = meta.block_count as usize;
+            let offsets_start = meta.block_offsets_start(file_len);
+            let mut offsets_buf = vec![0u8; block_count * 4];
+            pread(&file, &mut offsets_buf, offsets_start as u64).with_context(|| {
+                format!(
+                    "Failed to read block offset table from SST file {}",
+                    path.display()
+                )
+            })?;
+            let block_offsets: Vec<u32> = offsets_buf
+                .chunks_exact(4)
+                .map(|chunk| u32::from_be_bytes(chunk.try_into().unwrap()))
+                .collect();
+            StaticSortedFileBacking::File {
+                file: Arc::new(file),
+                file_len,
+                block_offsets,
+            }
         };
-        Ok(file)
+
+        Ok(Self { meta, backing })
     }
 
     /// Consume this file and return an iterator over all entries in sorted order.
@@ -483,11 +554,11 @@ impl StaticSortedFile {
             })?;
 
         // Verify checksum on the raw on-disk data before decompression.
-        self.verify_checksum(block, expected_checksum, block_index)?;
+        self.verify_checksum(&block, expected_checksum, block_index)?;
 
-        // 0 means the block was not compressed, return the mmap-backed ArcBytes directly
+        // 0 means the block was not compressed, return the ArcBytes directly
         if uncompressed_length == 0 {
-            return Ok(self.mmap_slice_to_arc_bytes(block));
+            return Ok(block);
         }
 
         // Advise Sequential only here: we're about to linearly scan the block
@@ -495,13 +566,15 @@ impl StaticSortedFile {
         // and lazy medium values (which call get_raw_block directly without
         // decompressing), the file-level Random advice applies.
         #[cfg(unix)]
-        let _ = self.mmap.advise_range(
-            memmap2::Advice::Sequential,
-            block.as_ptr() as usize - self.mmap.as_ptr() as usize,
-            block.len(),
-        );
+        if let StaticSortedFileBacking::Mmap { mmap } = &self.backing {
+            let _ = mmap.advise_range(
+                memmap2::Advice::Sequential,
+                block.as_ptr() as usize - mmap.as_ptr() as usize,
+                block.len(),
+            );
+        }
 
-        let buffer = decompress_into_arc(uncompressed_length, block).with_context(|| {
+        let buffer = decompress_into_arc(uncompressed_length, &block).with_context(|| {
             format!(
                 "Failed to decompress block {} from {:08}.sst ({} bytes uncompressed)",
                 block_index, self.meta.sequence_number, uncompressed_length
@@ -510,27 +583,32 @@ impl StaticSortedFile {
         Ok(ArcBytes::from(buffer))
     }
 
-    /// Returns `(uncompressed_length, block_data)` as an owned `ArcBytes` backed by
-    /// the mmap. Only use this when the block data needs to outlive the current borrow
-    /// (e.g. medium values stored in `LookupEntry`).
+    /// Returns `(uncompressed_length, checksum, block_data)` as an owned `ArcBytes`.
     fn get_raw_block(&self, block_index: u16) -> Result<(u32, u32, ArcBytes)> {
-        let (uncompressed_length, checksum, block) = self.get_raw_block_slice(block_index)?;
-        Ok((
-            uncompressed_length,
-            checksum,
-            self.mmap_slice_to_arc_bytes(block),
-        ))
+        self.get_raw_block_slice(block_index)
     }
 
-    /// Promotes a mmap subslice to an owned `ArcBytes`. This clones the `Arc<Mmap>`.
-    fn mmap_slice_to_arc_bytes(&self, subslice: &[u8]) -> ArcBytes {
-        // SAFETY: callers guarantee subslice points into self.mmap.
-        unsafe { ArcBytes::from_mmap(self.mmap.clone(), subslice) }
+    /// Gets the raw block data as an `ArcBytes`. For mmap-backed files, the returned
+    /// `ArcBytes` points into the mmap. For file-backed files, the data is read via pread.
+    fn get_raw_block_slice(&self, block_index: u16) -> Result<(u32, u32, ArcBytes)> {
+        match &self.backing {
+            StaticSortedFileBacking::Mmap { mmap } => {
+                self.get_raw_block_slice_mmap(mmap, block_index)
+            }
+            StaticSortedFileBacking::File {
+                file,
+                file_len,
+                block_offsets,
+            } => self.get_raw_block_slice_file(file, *file_len, block_offsets, block_index),
+        }
     }
 
-    /// Gets the raw block slice directly from the memory mapped file, without
-    /// cloning the `Arc<Mmap>`. The returned slice borrows from the mmap.
-    fn get_raw_block_slice(&self, block_index: u16) -> Result<(u32, u32, &[u8])> {
+    /// mmap path: reads block offsets and data directly from mapped memory.
+    fn get_raw_block_slice_mmap(
+        &self,
+        mmap: &Arc<Mmap>,
+        block_index: u16,
+    ) -> Result<(u32, u32, ArcBytes)> {
         #[cfg(feature = "strict_checks")]
         if block_index >= self.meta.block_count {
             bail!(
@@ -538,26 +616,26 @@ impl StaticSortedFile {
                 self.meta.sequence_number,
                 block_index,
                 self.meta.block_count,
-                self.meta.block_offsets_start(self.mmap.len()),
+                self.meta.block_offsets_start(mmap.len()),
             );
         }
-        let offset = self.meta.block_offsets_start(self.mmap.len()) + block_index as usize * 4;
+        let offset = self.meta.block_offsets_start(mmap.len()) + block_index as usize * 4;
         #[cfg(feature = "strict_checks")]
-        if offset + 4 > self.mmap.len() {
+        if offset + 4 > mmap.len() {
             bail!(
                 "Corrupted file seq:{} block:{} block offset locations {} + 4 bytes > file end {} \
                  (block_offsets: {:x})",
                 self.meta.sequence_number,
                 block_index,
                 offset,
-                self.mmap.len(),
-                self.meta.block_offsets_start(self.mmap.len()),
+                mmap.len(),
+                self.meta.block_offsets_start(mmap.len()),
             );
         }
         let block_start = if block_index == 0 {
             0
         } else {
-            (&self.mmap[offset - 4..offset])
+            (&mmap[offset - 4..offset])
                 .read_u32::<BE>()
                 .with_context(|| {
                     format!(
@@ -566,7 +644,7 @@ impl StaticSortedFile {
                     )
                 })? as usize
         };
-        let block_end = (&self.mmap[offset..offset + 4])
+        let block_end = (&mmap[offset..offset + 4])
             .read_u32::<BE>()
             .with_context(|| {
                 format!(
@@ -575,29 +653,28 @@ impl StaticSortedFile {
                 )
             })? as usize;
         #[cfg(feature = "strict_checks")]
-        if block_end > self.mmap.len() || block_start > self.mmap.len() {
+        if block_end > mmap.len() || block_start > mmap.len() {
             bail!(
                 "Corrupted file seq:{} block:{} block {} - {} > file end {} (block_offsets: {:x})",
                 self.meta.sequence_number,
                 block_index,
                 block_start,
                 block_end,
-                self.mmap.len(),
-                self.meta.block_offsets_start(self.mmap.len()),
+                mmap.len(),
+                self.meta.block_offsets_start(mmap.len()),
             );
         }
-        let uncompressed_length = u32::from_be_bytes(
-            self.mmap[block_start..block_start + 4]
-                .try_into()
-                .with_context(|| {
+        let uncompressed_length =
+            u32::from_be_bytes(mmap[block_start..block_start + 4].try_into().with_context(
+                || {
                     format!(
                         "Failed to read uncompressed_length from block {} header in {:08}.sst",
                         block_index, self.meta.sequence_number
                     )
-                })?,
-        );
+                },
+            )?);
         let checksum = u32::from_be_bytes(
-            self.mmap[block_start + 4..block_start + 8]
+            mmap[block_start + 4..block_start + 8]
                 .try_into()
                 .with_context(|| {
                     format!(
@@ -606,8 +683,58 @@ impl StaticSortedFile {
                     )
                 })?,
         );
-        let block = &self.mmap[block_start + BLOCK_HEADER_SIZE..block_end];
-        Ok((uncompressed_length, checksum, block))
+        let block = &mmap[block_start + BLOCK_HEADER_SIZE..block_end];
+        // SAFETY: block points into mmap.
+        let arc_bytes = unsafe { ArcBytes::from_mmap(mmap.clone(), block) };
+        Ok((uncompressed_length, checksum, arc_bytes))
+    }
+
+    /// File path: reads block data via pread using the in-memory block offset table.
+    fn get_raw_block_slice_file(
+        &self,
+        file: &Arc<File>,
+        file_len: usize,
+        block_offsets: &[u32],
+        block_index: u16,
+    ) -> Result<(u32, u32, ArcBytes)> {
+        let block_start = if block_index == 0 {
+            0usize
+        } else {
+            block_offsets[block_index as usize - 1] as usize
+        };
+        let block_end = block_offsets[block_index as usize] as usize;
+
+        #[cfg(feature = "strict_checks")]
+        if block_end > file_len || block_start > file_len {
+            bail!(
+                "Corrupted file seq:{} block:{} block {} - {} > file end {} (block_offsets: {:x})",
+                self.meta.sequence_number,
+                block_index,
+                block_start,
+                block_end,
+                file_len,
+                self.meta.block_offsets_start(file_len),
+            );
+        }
+        let _ = file_len;
+
+        // Read the entire block (header + data) in one pread call
+        let total_len = block_end - block_start;
+        let mut buf = vec![0u8; total_len];
+        pread(file, &mut buf, block_start as u64).with_context(|| {
+            format!(
+                "Failed to read block {} from {:08}.sst",
+                block_index, self.meta.sequence_number
+            )
+        })?;
+
+        let uncompressed_length = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let checksum = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+
+        // Remove the header, keep only the block data
+        let data: ArcBytes =
+            ArcBytes::from(Arc::from(buf.into_boxed_slice())).slice(BLOCK_HEADER_SIZE..total_len);
+        Ok((uncompressed_length, checksum, data))
     }
 }
 

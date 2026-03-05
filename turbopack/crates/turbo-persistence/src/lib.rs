@@ -57,6 +57,22 @@ pub struct FamilyConfig {
 #[derive(Clone, Debug)]
 pub struct DbConfig<const FAMILIES: usize> {
     pub family_configs: [FamilyConfig; FAMILIES],
+    /// Whether to use memory-mapped I/O for reading SST and meta files.
+    /// When false, blocks are read directly from files via pread.
+    pub mmap: bool,
+}
+
+impl<const FAMILIES: usize> DbConfig<FAMILIES> {
+    /// Returns a config with all defaults. Suitable for use in `const` contexts
+    /// (unlike `Default::default()`, which reads the `TURBO_PERSISTENCE_MMAP` env var).
+    pub const fn new() -> Self {
+        Self {
+            family_configs: [FamilyConfig {
+                kind: FamilyKind::SingleValue,
+            }; FAMILIES],
+            mmap: true,
+        }
+    }
 }
 
 impl<const FAMILIES: usize> Default for DbConfig<FAMILIES> {
@@ -65,6 +81,9 @@ impl<const FAMILIES: usize> Default for DbConfig<FAMILIES> {
             family_configs: [FamilyConfig {
                 kind: FamilyKind::SingleValue,
             }; FAMILIES],
+            mmap: std::env::var("TURBO_PERSISTENCE_MMAP")
+                .map(|v| v != "0")
+                .unwrap_or(true),
         }
     }
 }

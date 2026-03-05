@@ -488,6 +488,7 @@ impl<K: StoreKey + Send + Sync, S: ParallelScheduler, const FAMILIES: usize>
                     sequence_number: seq,
                     block_count: meta.block_count,
                 },
+                true,
             )?;
             let cache2 = BlockCache::with(
                 10,

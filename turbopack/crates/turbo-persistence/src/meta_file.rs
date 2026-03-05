@@ -5,7 +5,7 @@ use std::{
     io::{BufReader, Seek},
     ops::Deref,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::{Context, Result, bail};
@@ -18,9 +18,12 @@ use turbo_bincode::turbo_bincode_decode;
 
 use crate::{
     QueryKey,
+    arc_bytes::ArcBytes,
     lookup_entry::LookupValue,
     mmap_helper::advise_mmap_for_persistence,
-    static_sorted_file::{BlockCache, SstLookupResult, StaticSortedFile, StaticSortedFileMetaData},
+    static_sorted_file::{
+        BlockCache, SstLookupResult, StaticSortedFile, StaticSortedFileMetaData, pread,
+    },
 };
 
 bitfield! {
@@ -103,15 +106,15 @@ impl MetaEntry {
         self.end_of_amqf_data_offset - self.start_of_amqf_data_offset
     }
 
-    pub fn raw_amqf<'l>(&self, amqf_data: &'l [u8]) -> &'l [u8] {
-        amqf_data
-            .get(self.start_of_amqf_data_offset as usize..self.end_of_amqf_data_offset as usize)
-            .expect("AMQF data out of bounds")
+    pub fn raw_amqf(&self, meta: &MetaFile) -> Result<ArcBytes> {
+        let start = self.start_of_amqf_data_offset as usize;
+        let end = self.end_of_amqf_data_offset as usize;
+        meta.read_range(start, end)
     }
 
     pub fn deserialize_amqf(&self, meta: &MetaFile) -> Result<qfilter::Filter> {
-        let amqf = self.raw_amqf(meta.amqf_data());
-        Ok(turbo_bincode_decode::<AmqfBincodeWrapper>(amqf)
+        let amqf = self.raw_amqf(meta)?;
+        Ok(turbo_bincode_decode::<AmqfBincodeWrapper>(&amqf)
             .with_context(|| {
                 format!(
                     "Failed to deserialize AMQF from {:08}.meta for {:08}.sst",
@@ -131,7 +134,7 @@ impl MetaEntry {
 
     pub fn sst(&self, meta: &MetaFile) -> Result<&StaticSortedFile> {
         self.sst.get_or_try_init(|| {
-            StaticSortedFile::open(&meta.db_path, self.sst_data).with_context(|| {
+            StaticSortedFile::open(&meta.db_path, self.sst_data, meta.use_mmap).with_context(|| {
                 format!(
                     "Unable to open static sorted file referenced from {:08}.meta",
                     meta.sequence_number()
@@ -210,6 +213,20 @@ pub struct StaticSortedFileRange {
     pub max_hash: u64,
 }
 
+/// The backing storage for the AMQF data portion of a meta file.
+enum MetaFileBacking {
+    Mmap {
+        /// The memory mapped AMQF data region.
+        mmap: Arc<Mmap>,
+    },
+    File {
+        /// The file handle for on-demand reads.
+        file: File,
+        /// The byte offset in the file where the AMQF data starts (end of header).
+        base_offset: u64,
+    },
+}
+
 pub struct MetaFile {
     /// The database path
     db_path: PathBuf,
@@ -229,21 +246,28 @@ pub struct MetaFile {
     /// The offset of the end of the "used keys" AMQF data in the the meta file relative to the end
     /// of the header.
     end_of_used_keys_amqf_data_offset: u32,
-    /// The memory mapped file.
-    mmap: Mmap,
+    /// The backing storage for AMQF data.
+    backing: MetaFileBacking,
+    /// Whether to use mmap for SST files opened from this meta file.
+    use_mmap: bool,
 }
 
 impl MetaFile {
-    /// Opens a meta file at the given path. This memory maps the file, but does not read it yet.
-    /// It's lazy read on demand.
-    pub fn open(db_path: &Path, sequence_number: u32) -> Result<Self> {
+    /// Opens a meta file at the given path. The AMQF data portion is either memory mapped
+    /// or read on demand from the file, depending on `use_mmap`.
+    pub fn open(db_path: &Path, sequence_number: u32, use_mmap: bool) -> Result<Self> {
         let filename = format!("{sequence_number:08}.meta");
         let path = db_path.join(&filename);
-        Self::open_internal(db_path.to_path_buf(), sequence_number, &path)
+        Self::open_internal(db_path.to_path_buf(), sequence_number, &path, use_mmap)
             .with_context(|| format!("Unable to open meta file {filename}"))
     }
 
-    fn open_internal(db_path: PathBuf, sequence_number: u32, path: &Path) -> Result<Self> {
+    fn open_internal(
+        db_path: PathBuf,
+        sequence_number: u32,
+        path: &Path,
+        use_mmap: bool,
+    ) -> Result<Self> {
         let mut file = BufReader::new(File::open(path)?);
         let magic = file.read_u32::<BE>()?;
         if magic != 0xFE4ADA4A {
@@ -281,16 +305,25 @@ impl MetaFile {
         let start_of_used_keys_amqf_data_offset = start_of_amqf_data_offset;
         let end_of_used_keys_amqf_data_offset = file.read_u32::<BE>()?;
 
-        let offset = file.stream_position()?;
+        let base_offset = file.stream_position()?;
         let file = file.into_inner();
-        let mut options = MmapOptions::new();
-        options.offset(offset);
-        let mmap = unsafe { options.map(&file) }
-            .with_context(|| format!("Failed to mmap meta file {}", path.display()))?;
-        #[cfg(unix)]
-        mmap.advise(memmap2::Advice::Random)?;
-        advise_mmap_for_persistence(&mmap)?;
-        let file = Self {
+
+        let backing = if use_mmap {
+            let mut options = MmapOptions::new();
+            options.offset(base_offset);
+            let mmap = unsafe { options.map(&file) }
+                .with_context(|| format!("Failed to mmap meta file {}", path.display()))?;
+            #[cfg(unix)]
+            mmap.advise(memmap2::Advice::Random)?;
+            advise_mmap_for_persistence(&mmap)?;
+            MetaFileBacking::Mmap {
+                mmap: Arc::new(mmap),
+            }
+        } else {
+            MetaFileBacking::File { file, base_offset }
+        };
+
+        Ok(Self {
             db_path,
             sequence_number,
             family,
@@ -299,9 +332,9 @@ impl MetaFile {
             obsolete_sst_files,
             start_of_used_keys_amqf_data_offset,
             end_of_used_keys_amqf_data_offset,
-            mmap,
-        };
-        Ok(file)
+            backing,
+            use_mmap,
+        })
     }
 
     pub fn clear_cache(&mut self) {
@@ -335,17 +368,37 @@ impl MetaFile {
         &self.entries[index]
     }
 
-    pub fn amqf_data(&self) -> &[u8] {
-        &self.mmap
+    /// Reads a byte range from the AMQF data region (offsets relative to the AMQF data start).
+    fn read_range(&self, start: usize, end: usize) -> Result<ArcBytes> {
+        match &self.backing {
+            MetaFileBacking::Mmap { mmap } => {
+                let slice = &mmap[start..end];
+                // SAFETY: slice points into mmap.
+                Ok(unsafe { ArcBytes::from_mmap(mmap.clone(), slice) })
+            }
+            MetaFileBacking::File { file, base_offset } => {
+                let len = end - start;
+                let mut buf = vec![0u8; len];
+                pread(file, &mut buf, base_offset + start as u64).with_context(|| {
+                    format!(
+                        "Failed to read AMQF data range {}..{} from {:08}.meta",
+                        start, end, self.sequence_number
+                    )
+                })?;
+                Ok(ArcBytes::from(buf.into_boxed_slice()))
+            }
+        }
     }
 
     pub fn deserialize_used_key_hashes_amqf(&self) -> Result<Option<qfilter::Filter>> {
         if self.start_of_used_keys_amqf_data_offset == self.end_of_used_keys_amqf_data_offset {
             return Ok(None);
         }
-        let amqf = &self.amqf_data()[self.start_of_used_keys_amqf_data_offset as usize
-            ..self.end_of_used_keys_amqf_data_offset as usize];
-        Ok(Some(pot::from_slice(amqf).with_context(|| {
+        let amqf = self.read_range(
+            self.start_of_used_keys_amqf_data_offset as usize,
+            self.end_of_used_keys_amqf_data_offset as usize,
+        )?;
+        Ok(Some(pot::from_slice(&amqf).with_context(|| {
             format!(
                 "Failed to deserialize used key hashes AMQF from {:08}.meta",
                 self.sequence_number
