@@ -1911,7 +1911,7 @@ importers:
         version: 1.0.20
     devDependencies:
       next:
-        specifier: 16.2.0-canary.85
+        specifier: workspace:*
         version: link:../next
       outdent:
         specifier: 0.8.0
