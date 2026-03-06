@@ -105,36 +105,6 @@ importers:
       '@mdx-js/react':
         specifier: 2.2.1
         version: 2.2.1(react@19.3.0-canary-46103596-20260305)
-      '@next/bundle-analyzer':
-        specifier: workspace:*
-        version: link:packages/next-bundle-analyzer
-      '@next/env':
-        specifier: workspace:*
-        version: link:packages/next-env
-      '@next/eslint-plugin-next':
-        specifier: workspace:*
-        version: link:packages/eslint-plugin-next
-      '@next/font':
-        specifier: workspace:*
-        version: link:packages/font
-      '@next/mdx':
-        specifier: workspace:*
-        version: link:packages/next-mdx
-      '@next/plugin-storybook':
-        specifier: workspace:*
-        version: link:packages/next-plugin-storybook
-      '@next/polyfill-module':
-        specifier: workspace:*
-        version: link:packages/next-polyfill-module
-      '@next/polyfill-nomodule':
-        specifier: workspace:*
-        version: link:packages/next-polyfill-nomodule
-      '@next/swc':
-        specifier: workspace:*
-        version: link:packages/next-swc
-      '@next/third-parties':
-        specifier: workspace:*
-        version: link:packages/third-parties
       '@opentelemetry/api':
         specifier: 1.4.1
         version: 1.4.1
@@ -225,9 +195,6 @@ importers:
       '@vercel/agent-eval':
         specifier: 0.8.0
         version: 0.8.0
-      '@vercel/devlow-bench':
-        specifier: workspace:*
-        version: link:turbopack/packages/devlow-bench
       '@vercel/kv':
         specifier: 3.0.0
         version: 3.0.0
@@ -264,9 +231,6 @@ importers:
       coveralls:
         specifier: 3.0.3
         version: 3.0.3
-      create-next-app:
-        specifier: workspace:*
-        version: link:packages/create-next-app
       critters:
         specifier: 0.0.6
         version: 0.0.6
@@ -288,9 +252,6 @@ importers:
       eslint:
         specifier: 9.37.0
         version: 9.37.0(jiti@2.6.1)
-      eslint-config-next:
-        specifier: workspace:*
-        version: link:packages/eslint-config-next
       eslint-formatter-codeframe:
         specifier: 7.32.1
         version: 7.32.1
@@ -432,9 +393,6 @@ importers:
       nanoid:
         specifier: 3.1.30
         version: 3.1.30
-      next:
-        specifier: workspace:*
-        version: link:packages/next
       node-fetch:
         specifier: 2.6.7
         version: 2.6.7(encoding@0.1.13)
