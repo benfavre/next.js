@@ -6,6 +6,13 @@ import { renderStyledStringToErrorAnsi } from './utils'
 
 const VERBOSE_ISSUES = !!process.env.NEXT_TURBOPACK_VERBOSE_ISSUES
 
+function formatFilePath(filePath: string): string {
+  return filePath
+    .replace('[project]/', './')
+    .replaceAll('/./', '/')
+    .replace('\\\\?\\', '')
+}
+
 export function formatIssue(issue: Issue) {
   const { filePath, title, description, detail, source, importTraces } = issue
   let { documentationLink } = issue
@@ -22,10 +29,7 @@ export function formatIssue(issue: Issue) {
     documentationLink = 'https://nextjs.org/docs/messages/module-not-found'
   }
 
-  const formattedFilePath = filePath
-    .replace('[project]/', './')
-    .replaceAll('/./', '/')
-    .replace('\\\\?\\', '')
+  const formattedFilePath = formatFilePath(filePath)
 
   let message = ''
 
@@ -86,6 +90,40 @@ export function formatIssue(issue: Issue) {
   // TODO: make it easier to enable this for debugging
   if (VERBOSE_ISSUES && detail) {
     message += renderStyledStringToErrorAnsi(detail) + '\n\n'
+  }
+
+  // Render additional sources (e.g., generated code from a loader)
+  if (issue.additionalSources?.length) {
+    for (const additional of issue.additionalSources) {
+      const { description: desc, source: additionalSource } = additional
+      if (
+        additionalSource.range &&
+        additionalSource.source.content &&
+        // ignore Next.js/React internals, as these can often be huge bundled files.
+        !isInternal(additionalSource.source.filePath)
+      ) {
+        message += `${desc}:\n`
+        const { start, end } = additionalSource.range
+        message += `${formatFilePath(additionalSource.source.filePath)}:${start.line + 1}:${start.column + 1}\n`
+        const additionalFrame = codeFrameColumns(
+          additionalSource.source.content,
+          {
+            start: {
+              line: start.line + 1,
+              column: start.column + 1,
+            },
+            end: {
+              line: end.line + 1,
+              column: end.column + 1,
+            },
+          },
+          { color: true }
+        )
+        if (additionalFrame) {
+          message += additionalFrame.trimEnd() + '\n\n'
+        }
+      }
+    }
   }
 
   if (importTraces?.length) {
