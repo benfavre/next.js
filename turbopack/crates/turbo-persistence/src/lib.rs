@@ -75,12 +75,15 @@ impl<const FAMILIES: usize> DbConfig<FAMILIES> {
     }
 }
 
-/// Reads the `TURBO_PERSISTENCE_MMAP` env var. Returns `false` when the var is set to `"0"`,
-/// `true` otherwise.
+/// Reads the `TURBO_PERSISTENCE_MMAP` env var (cached). Returns `false` when the var is set to
+/// `"0"`, `true` otherwise.
 fn mmap_env_var() -> bool {
-    std::env::var("TURBO_PERSISTENCE_MMAP")
-        .map(|v| v != "0")
-        .unwrap_or(true)
+    static MMAP_ENV: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("TURBO_PERSISTENCE_MMAP")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    });
+    *MMAP_ENV
 }
 
 impl<const FAMILIES: usize> Default for DbConfig<FAMILIES> {
