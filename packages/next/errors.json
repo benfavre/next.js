@@ -1103,5 +1103,6 @@
   "1102": "createServerParamsForRoute should not be called inside generateStaticParams.",
   "1103": "Route %s used \\`draftMode()\\` inside \\`generateStaticParams\\`. This is not supported because \\`generateStaticParams\\` runs at build time without an HTTP request. Read more: https://nextjs.org/docs/messages/next-dynamic-api-wrong-context",
   "1104": "createSearchParamsFromClient should not be called inside generateStaticParams.",
-  "1105": "Route %s used \\`headers()\\` inside \\`generateStaticParams\\`. This is not supported because \\`generateStaticParams\\` runs at build time without an HTTP request. Read more: https://nextjs.org/docs/messages/next-dynamic-api-wrong-context"
+  "1105": "Route %s used \\`headers()\\` inside \\`generateStaticParams\\`. This is not supported because \\`generateStaticParams\\` runs at build time without an HTTP request. Read more: https://nextjs.org/docs/messages/next-dynamic-api-wrong-context",
+  "1106": "\"use cache\" cannot be used outside of App Router. Expected a WorkUnitStore."
 }
