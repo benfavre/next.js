@@ -764,6 +764,68 @@ function segmentConsumesURLDepth(segment: Segment): boolean {
 }
 
 /**
+ * Walks the LoaderTree to discover validation depth bounds.
+ *
+ * Returns an array where:
+ * - length = max URL depth (number of URL-consuming segments)
+ * - array[i] = max group depth at URL depth i (number of route group
+ *   segments between this URL depth and the next)
+ *
+ * For example, a tree like:
+ *   '' / (outer) / (inner) / dashboard / page
+ * returns [2, 0] — URL depth 0 (root) has 2 group layers before
+ * the next URL segment (dashboard), and URL depth 1 (dashboard) has
+ * 0 group layers before the leaf.
+ */
+export function discoverValidationDepths(loaderTree: LoaderTree): number[] {
+  const groupDepthsByUrlDepth: number[] = []
+
+  function recordGroupDepth(urlDepth: number, groupDepth: number): void {
+    while (groupDepthsByUrlDepth.length <= urlDepth) {
+      groupDepthsByUrlDepth.push(0)
+    }
+    if (groupDepth > groupDepthsByUrlDepth[urlDepth]) {
+      groupDepthsByUrlDepth[urlDepth] = groupDepth
+    }
+  }
+
+  // urlDepth tracks the index of the current URL-consuming segment.
+  // Groups accumulate at the same index. When the next URL segment
+  // is reached, it increments the index and resets the group counter.
+  // We start at -1 so the root segment '' increments to 0.
+  function walk(tree: LoaderTree, urlDepth: number, groupDepth: number): void {
+    const segment = tree[0]
+    const { parallelRoutes } = parseLoaderTree(tree)
+    const consumesDepth = segmentConsumesURLDepth(segment)
+
+    let nextUrlDepth = urlDepth
+    let nextGroupDepth = groupDepth
+    if (consumesDepth) {
+      nextUrlDepth = urlDepth + 1
+      nextGroupDepth = 0
+      recordGroupDepth(nextUrlDepth, 0)
+    } else if (
+      typeof segment === 'string' &&
+      isGroupSegment(segment) &&
+      segment !== '(slot)'
+    ) {
+      // Count real route groups but not the synthetic '(slot)' segment
+      // that Next.js inserts for parallel slots. The synthetic group
+      // can't be a real navigation boundary.
+      nextGroupDepth++
+      recordGroupDepth(urlDepth, nextGroupDepth)
+    }
+
+    for (const key in parallelRoutes) {
+      walk(parallelRoutes[key], nextUrlDepth, nextGroupDepth)
+    }
+  }
+
+  walk(loaderTree, -1, 0)
+  return groupDepthsByUrlDepth
+}
+
+/**
  * Builds a combined RSC payload for validation at a given URL depth.
  *
  * Walks the LoaderTree directly, loading modules and counting
@@ -793,6 +855,7 @@ export async function createCombinedPayloadAtDepth(
   getDynamicParamFromSegment: GetDynamicParamFromSegment,
   query: NextParsedUrlQuery | null,
   depth: number,
+  groupDepth: number,
   releaseSignal: AbortSignal,
   boundaryState: ValidationBoundaryTracking,
   clientReferenceManifest: ClientReferenceManifest,
@@ -815,7 +878,8 @@ export async function createCombinedPayloadAtDepth(
     loaderTree: LoaderTree,
     parentPath: SegmentPath | null,
     key: string | null,
-    urlDepthConsumed: number
+    urlDepthConsumed: number,
+    groupDepthConsumed: number
   ): Promise<TreeResult> {
     const { parallelRoutes } = parseLoaderTree(loaderTree)
 
@@ -840,12 +904,35 @@ export async function createCombinedPayloadAtDepth(
       null
     )
 
-    const consumesDepth = segmentConsumesURLDepth(segment)
+    const consumesUrlDepth = segmentConsumesURLDepth(segment)
+    const isGroup =
+      typeof segment === 'string' &&
+      isGroupSegment(segment) &&
+      segment !== '(slot)'
 
-    if (consumesDepth && urlDepthConsumed === depth) {
-      debug?.(`    ['${path}' is the boundary]`)
+    // Advance counters for this segment before the boundary check,
+    // mirroring how discoverValidationDepths counts. URL segments
+    // increment urlDepthConsumed, groups increment groupDepthConsumed.
+    // The synthetic '(slot)' segment is excluded — it can't be a
+    // real navigation boundary.
+    let nextUrlDepth = urlDepthConsumed
+    let currentGroupDepth = groupDepthConsumed
+    if (consumesUrlDepth) {
+      nextUrlDepth++
+      currentGroupDepth = 0
+    } else if (isGroup) {
+      currentGroupDepth++
+    }
+
+    const pastUrlBoundary = nextUrlDepth > depth
+    const isBoundary = pastUrlBoundary && currentGroupDepth >= groupDepth
+
+    if (isBoundary) {
+      debug?.(
+        `    ['${path}' is the boundary (url=${nextUrlDepth}, group=${currentGroupDepth})]`
+      )
       boundaryState.expectedIds.add(path)
-      const wrappedSegmentData: SegmentData = {
+      const finalSegmentData: SegmentData = {
         ...segmentData,
         node: (
           // eslint-disable-next-line @next/internal/no-ambiguous-jsx -- bundled in the server layer
@@ -854,6 +941,7 @@ export async function createCombinedPayloadAtDepth(
           </PlaceValidationBoundaryBelowThisLevel>
         ),
       }
+
       const slots: CacheNodeSeedDataSlots = {}
       let requiresInstantUI = false
       let createInstantStack: (() => Error) | null = null
@@ -873,13 +961,13 @@ export async function createCombinedPayloadAtDepth(
         }
       }
       return {
-        seedData: getCacheNodeSeedDataFromSegment(wrappedSegmentData, slots),
+        seedData: getCacheNodeSeedDataFromSegment(finalSegmentData, slots),
         requiresInstantUI,
         createInstantStack,
       }
     }
 
-    // Not the boundary yet — keep walking the shared tree.
+    // Not at the boundary yet — keep walking as shared.
     const slots: CacheNodeSeedDataSlots = {}
     let requiresInstantUI = false
     let createInstantStack: (() => Error) | null = null
@@ -888,7 +976,8 @@ export async function createCombinedPayloadAtDepth(
         parallelRoutes[parallelRouteKey],
         path,
         parallelRouteKey,
-        consumesDepth ? urlDepthConsumed + 1 : urlDepthConsumed
+        nextUrlDepth,
+        currentGroupDepth
       )
       slots[parallelRouteKey] = result.seedData
       if (result.requiresInstantUI) {
@@ -925,7 +1014,6 @@ export async function createCombinedPayloadAtDepth(
     if (layoutOrPageMod !== undefined) {
       instantConfig =
         (layoutOrPageMod as AppSegmentConfig).unstable_instant ?? null
-
       if (instantConfig && typeof instantConfig === 'object') {
         const rawFactory: unknown = (layoutOrPageMod as any)
           .__debugCreateInstantConfigStack
@@ -1020,7 +1108,8 @@ export async function createCombinedPayloadAtDepth(
       initialLoaderTree,
       null /* parentPath */,
       null /* key */,
-      0 /* urlDepthConsumed */
+      0 /* urlDepthConsumed */,
+      0 /* groupDepthConsumed */
     )
 
   if (!requiresInstantUI) {
