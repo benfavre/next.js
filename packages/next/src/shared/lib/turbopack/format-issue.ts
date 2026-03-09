@@ -18,16 +18,27 @@ function formatFilePath(filePath: string): string {
 }
 
 /**
- * Formats an IssueSource as a code frame with file location header.
+ * Renders the code frame for an IssueSource (the highlighted snippet).
  * Returns empty string if the source has no range, no content, or
  * points to an internal (Next.js/React) file.
+ *
+ * When `includeLocation` is true, prepends a `filePath:line:column` header.
+ * The primary source omits this (the location is already in the issue title),
+ * while additional sources include it.
  */
-function formatSourceCodeFrame(source: IssueSource, filePath: string): string {
+function formatSourceCodeFrame(
+  source: IssueSource,
+  filePath: string,
+  includeLocation: boolean
+): string {
   if (!source.range || !source.source.content || isInternal(filePath)) {
     return ''
   }
   const { start, end } = source.range
-  let result = `${formatFilePath(filePath)}:${start.line + 1}:${start.column + 1}\n`
+  let result = ''
+  if (includeLocation) {
+    result += `${formatFilePath(filePath)}:${start.line + 1}:${start.column + 1}\n`
+  }
   const frame = codeFrameColumns(
     source.source.content,
     {
@@ -76,7 +87,8 @@ export function formatIssue(issue: Issue) {
 
   if (source) {
     // TODO(lukesandberg): move codeFrame formatting into turbopack, it would be more efficient than passing the source back and forth
-    message += formatSourceCodeFrame(source, filePath)
+    // Primary source: location is already in the message title above, so skip it here
+    message += formatSourceCodeFrame(source, filePath, false)
   }
 
   if (description) {
@@ -100,9 +112,11 @@ export function formatIssue(issue: Issue) {
 
   // Render additional sources (e.g., generated code from a loader)
   for (const additional of issue.additionalSources ?? []) {
+    // Additional sources need the location header since they aren't part of the title
     const codeFrame = formatSourceCodeFrame(
       additional.source,
-      additional.source.source.filePath
+      additional.source.source.filePath,
+      true
     )
     if (codeFrame) {
       message += `${additional.description}:\n${codeFrame}`
