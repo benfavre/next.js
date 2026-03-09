@@ -7,7 +7,10 @@ export type Step = <T>(title: string, body: () => Promise<T>) => Promise<T>
  */
 let step: Step = (_title, body) => body()
 try {
-  const pw = require('@playwright/test') as typeof import('@playwright/test')
+  // Use a structural type instead of `typeof import('@playwright/test')` so
+  // this file compiles without @playwright/test installed (it is an optional
+  // peer dependency).
+  const pw: { test?: { step?: Step } } = (require('@playwright/test') as typeof import('@playwright/test'))
   if (typeof pw.test?.step === 'function') {
     const playwrightStep = pw.test.step
     step = async (title, body) => {

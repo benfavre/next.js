@@ -697,6 +697,11 @@ impl ChunkingContext for BrowserChunkingContext {
     }
 
     #[turbo_tasks::function]
+    fn is_hot_module_replacement_enabled(&self) -> Vc<bool> {
+        Vc::cell(self.enable_hot_module_replacement)
+    }
+
+    #[turbo_tasks::function]
     fn is_tracing_enabled(&self) -> Vc<bool> {
         Vc::cell(self.enable_tracing)
     }

@@ -380,6 +380,12 @@ pub trait ChunkingContext {
         })
     }
 
+    /// Whether hot module replacement is enabled for this chunking context.
+    #[turbo_tasks::function]
+    fn is_hot_module_replacement_enabled(self: Vc<Self>) -> Vc<bool> {
+        Vc::cell(false)
+    }
+
     /// Whether `ChunkingType::Traced` are used to create corresponding output assets for each
     /// traced module.
     #[turbo_tasks::function]
