@@ -6,7 +6,7 @@ import { checkBuildFreshness } from './lib/check-build-freshness'
 // process.on() operates on a separate EventEmitter from the real process where
 // unhandled rejections fire. The filter patches process.on() to use an internal queue
 // that both the host and VM contexts share, making the interception work.
-import 'next/dist/server/node-environment-extensions/unhandled-rejection.external'
+import '../packages/next/dist/server/node-environment-extensions/unhandled-rejection.external'
 
 export default async function globalSetup() {
   await checkBuildFreshness()
