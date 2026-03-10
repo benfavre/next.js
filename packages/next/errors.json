@@ -1103,5 +1103,6 @@
   "1102": "Worker exited during shutdown",
   "1103": "Worker pool ended while requests were in-flight",
   "1104": "Worker is ended, no more calls can be done to it",
-  "1105": "Export encountered an error on %s, exiting the build."
+  "1105": "Export encountered an error on %s, exiting the build.",
+  "1106": "Worker timed out"
 }
