@@ -79,6 +79,10 @@ export function createParamsFromClient(
         throw new InvariantError(
           'createParamsFromClient should not be called in a runtime prerender.'
         )
+      case 'generate-static-params':
+        throw new InvariantError(
+          'createParamsFromClient should not be called inside generateStaticParams.'
+        )
       case 'request':
         if (process.env.NODE_ENV === 'development') {
           // Semantically we only need the dev tracking when running in `next dev`
@@ -153,6 +157,10 @@ export function createServerParamsForRoute(
         throw new InvariantError(
           'createServerParamsForRoute should not be called in cache contexts.'
         )
+      case 'generate-static-params':
+        throw new InvariantError(
+          'createServerParamsForRoute should not be called inside generateStaticParams.'
+        )
       case 'prerender-runtime': {
         // Route params are not runtime prefetchable
         const isRuntimePrefetchable = false
@@ -221,6 +229,10 @@ export function createServerParamsForServerSegment(
       case 'unstable-cache':
         throw new InvariantError(
           'createServerParamsForServerSegment should not be called in cache contexts.'
+        )
+      case 'generate-static-params':
+        throw new InvariantError(
+          'createServerParamsForServerSegment should not be called inside generateStaticParams.'
         )
       case 'prerender-runtime':
         return createRuntimePrerenderParams(
@@ -302,6 +314,10 @@ export function createPrerenderParamsForClientSegment(
       case 'unstable-cache':
         throw new InvariantError(
           'createPrerenderParamsForClientSegment should not be called in cache contexts.'
+        )
+      case 'generate-static-params':
+        throw new InvariantError(
+          'createPrerenderParamsForClientSegment should not be called inside generateStaticParams.'
         )
       case 'prerender-ppr':
       case 'prerender-legacy':

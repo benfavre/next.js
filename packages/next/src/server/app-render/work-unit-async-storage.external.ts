@@ -363,7 +363,16 @@ export interface UnstableCacheStore extends CommonCacheStore {
  */
 export type CacheStore = UseCacheStore | UnstableCacheStore
 
-export type WorkUnitStore = RequestStore | CacheStore | PrerenderStore
+export interface GenerateStaticParamsStore extends CommonWorkUnitStore {
+  readonly type: 'generate-static-params'
+  readonly rootParams: Params
+}
+
+export type WorkUnitStore =
+  | RequestStore
+  | CacheStore
+  | PrerenderStore
+  | GenerateStaticParamsStore
 
 export type WorkUnitAsyncStorage = AsyncLocalStorage<WorkUnitStore>
 
@@ -403,6 +412,7 @@ export function getPrerenderResumeDataCache(
     case 'cache':
     case 'private-cache':
     case 'unstable-cache':
+    case 'generate-static-params':
       return null
     default:
       return workUnitStore satisfies never
@@ -432,6 +442,7 @@ export function getRenderResumeDataCache(
     case 'private-cache':
     case 'unstable-cache':
     case 'prerender-legacy':
+    case 'generate-static-params':
       return null
     default:
       return workUnitStore satisfies never
@@ -455,6 +466,7 @@ export function getHmrRefreshHash(
       case 'prerender-ppr':
       case 'prerender-legacy':
       case 'unstable-cache':
+      case 'generate-static-params':
         break
       default:
         workUnitStore satisfies never
@@ -478,6 +490,7 @@ export function isHmrRefresh(workUnitStore: WorkUnitStore): boolean {
       case 'prerender-ppr':
       case 'prerender-legacy':
       case 'unstable-cache':
+      case 'generate-static-params':
         break
       default:
         workUnitStore satisfies never
@@ -503,6 +516,7 @@ export function getServerComponentsHmrCache(
       case 'prerender-ppr':
       case 'prerender-legacy':
       case 'unstable-cache':
+      case 'generate-static-params':
         break
       default:
         workUnitStore satisfies never
@@ -532,6 +546,7 @@ export function getDraftModeProviderForCacheScope(
       case 'validation-client':
       case 'prerender-ppr':
       case 'prerender-legacy':
+      case 'generate-static-params':
         break
       default:
         workUnitStore satisfies never
@@ -556,6 +571,7 @@ export function getStagedRenderingController(
     case 'cache':
     case 'private-cache':
     case 'unstable-cache':
+    case 'generate-static-params':
       return null
     default:
       return workUnitStore satisfies never
@@ -583,6 +599,7 @@ export function getCacheSignal(
     case 'cache':
     case 'private-cache':
     case 'unstable-cache':
+    case 'generate-static-params':
       return null
     default:
       return workUnitStore satisfies never

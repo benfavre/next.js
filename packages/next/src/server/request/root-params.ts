@@ -82,7 +82,8 @@ export function getRootParam(paramName: string): Promise<ParamValue> {
     }
     case 'private-cache':
     case 'prerender-runtime':
-    case 'request': {
+    case 'request':
+    case 'generate-static-params': {
       break
     }
     default: {
