@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::HashSet,
     fs::{self, File, OpenOptions, ReadDir},
     io::{BufWriter, Write},
@@ -12,6 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use byteorder::{BE, ReadBytesExt, WriteBytesExt};
 use dashmap::DashSet;
+use either::Either;
 use jiff::Timestamp;
 use memmap2::Mmap;
 use nohash_hasher::BuildNoHashHasher;
@@ -410,7 +410,9 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         let file = File::open(&path)
             .with_context(|| format!("Failed to open blob file {}", path.display()))?;
 
-        let data: Vec<u8> = if self.config.mmap {
+        // Read the blob data either via mmap or plain file reads, avoiding an
+        // extra copy in the mmap path.
+        let data: Either<Mmap, Vec<u8>> = if self.config.mmap {
             let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
                 format!(
                     "Failed to mmap blob file {} ({} bytes)",
@@ -423,17 +425,20 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
             #[cfg(unix)]
             mmap.advise(memmap2::Advice::WillNeed)?;
             advise_mmap_for_persistence(&mmap)?;
-            mmap.to_vec()
+            Either::Left(mmap)
         } else {
             use std::io::Read;
             let mut buf = Vec::new();
             let mut file = std::io::BufReader::new(file);
             file.read_to_end(&mut buf)
                 .with_context(|| format!("Failed to read blob file {}", path.display()))?;
-            buf
+            Either::Right(buf)
         };
 
-        let mut reader = &data[..];
+        let mut reader: &[u8] = match &data {
+            Either::Left(mmap) => mmap,
+            Either::Right(vec) => vec,
+        };
         let uncompressed_length = reader
             .read_u32::<BE>()
             .context("Failed to read uncompressed length from blob file")?;
@@ -1043,16 +1048,16 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
 
                     // Merge SST files
                     let span = tracing::trace_span!("merge files");
-                    enum PartialMergeResult<'l> {
+                    enum PartialMergeResult {
                         Merged {
-                            new_sst_files: Vec<(u32, File, StaticSortedFileBuilderMeta<'static>)>,
+                            new_sst_files: Vec<(u32, File, StaticSortedFileBuilderMeta)>,
                             blob_seq_numbers_to_delete: Vec<u32>,
                             keys_written: u64,
                             indices: SmallVec<[usize; 1]>,
                         },
                         Move {
                             seq: u32,
-                            meta: StaticSortedFileBuilderMeta<'l>,
+                            meta: StaticSortedFileBuilderMeta,
                         },
                     }
                     let merge_result = self
@@ -1066,7 +1071,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                                 let index_in_meta = ssts_with_ranges[index].index_in_meta;
                                 let meta_file = &meta_files[meta_index];
                                 let entry = meta_file.entry(index_in_meta);
-                                let amqf = Cow::Owned(entry.raw_amqf(meta_file)?.to_vec());
+                                let amqf = entry.raw_amqf(meta_file)?.into();
                                 let meta = StaticSortedFileBuilderMeta {
                                     min_hash: entry.min_hash(),
                                     max_hash: entry.max_hash(),
@@ -1115,8 +1120,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                                 /// used set).
                                 writer: Option<(u32, StreamingSstWriter<LookupEntry>)>,
                                 flags: MetaEntryFlags,
-                                new_sst_files:
-                                    Vec<(u32, File, StaticSortedFileBuilderMeta<'static>)>,
+                                new_sst_files: Vec<(u32, File, StaticSortedFileBuilderMeta)>,
                                 /// Hash of the last key added. Used to ensure we only split
                                 /// SST files at key boundaries (not mid-key-group for MultiValue).
                                 last_hash: Option<u64>,
