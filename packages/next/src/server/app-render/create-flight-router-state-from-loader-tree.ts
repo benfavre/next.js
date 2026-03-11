@@ -22,8 +22,32 @@ async function createFlightRouterStateFromLoaderTreeImpl(
     {},
   ]
 
-  // Load the layout or page module to check for unstable_instant config
-  const mod = layout ? await layout[0]() : page ? await page[0]() : undefined
+  // Kick off module loading and all child tree traversals concurrently.
+  // Previously these were sequential: module load blocked children, and
+  // children were awaited one-by-one in a for...in loop. On cold start
+  // with many segments this caused cascading awaits for module loading.
+  const modPromise = layout
+    ? layout[0]()
+    : page
+      ? page[0]()
+      : Promise.resolve(undefined)
+
+  const parallelRouteKeys = Object.keys(parallelRoutes)
+  const childPromises = parallelRouteKeys.map((key) =>
+    createFlightRouterStateFromLoaderTreeImpl(
+      parallelRoutes[key],
+      getDynamicParamFromSegment,
+      searchParams,
+      didFindRootLayout || typeof layout !== 'undefined'
+    )
+  )
+
+  // Await module and all children in parallel
+  const [mod, ...childResults] = await Promise.all([
+    modPromise,
+    ...childPromises,
+  ])
+
   const instantConfig = mod
     ? (mod as AppSegmentConfig).unstable_instant
     : undefined
@@ -31,7 +55,6 @@ async function createFlightRouterStateFromLoaderTreeImpl(
 
   // Mark the first segment that has a layout as the "root" layout
   if (!didFindRootLayout && typeof layout !== 'undefined') {
-    didFindRootLayout = true
     prefetchHints |= PrefetchHint.IsRootLayout
   }
 
@@ -48,13 +71,8 @@ async function createFlightRouterStateFromLoaderTreeImpl(
   }
 
   const children: FlightRouterState[1] = {}
-  for (const parallelRouteKey in parallelRoutes) {
-    const child = await createFlightRouterStateFromLoaderTreeImpl(
-      parallelRoutes[parallelRouteKey],
-      getDynamicParamFromSegment,
-      searchParams,
-      didFindRootLayout
-    )
+  for (let i = 0; i < parallelRouteKeys.length; i++) {
+    const child = childResults[i]
     // Propagate subtree flags from children
     if (child[4] !== undefined) {
       prefetchHints |=
@@ -71,7 +89,7 @@ async function createFlightRouterStateFromLoaderTreeImpl(
         prefetchHints |= PrefetchHint.SubtreeHasLoadingBoundary
       }
     }
-    children[parallelRouteKey] = child
+    children[parallelRouteKeys[i]] = child
   }
   segmentTree[1] = children
 
