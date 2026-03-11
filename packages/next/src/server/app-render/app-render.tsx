@@ -551,8 +551,11 @@ async function generateDynamicRSCPayload(
       !options?.actionResult && // Only for navigations
       (await anySegmentNeedsInstantValidation(loaderTree))
 
-    const metadataIsRuntimePrefetchable =
-      await anySegmentHasRuntimePrefetchEnabled(loaderTree)
+    // unstable_instant (runtime prefetch) requires cacheComponents. Skip the
+    // expensive module-loading tree walk when cacheComponents is disabled.
+    const metadataIsRuntimePrefetchable = ctx.renderOpts.cacheComponents
+      ? await anySegmentHasRuntimePrefetchEnabled(loaderTree)
+      : false
     const { Viewport, Metadata, MetadataOutlet } = createMetadataComponents({
       tree: loaderTree,
       parsedQuery: query,
@@ -1651,8 +1654,11 @@ async function getRSCPayload(
   const serveStreamingMetadata = !!ctx.renderOpts.serveStreamingMetadata
   const hasGlobalNotFound = !!tree[2]['global-not-found']
 
-  const metadataIsRuntimePrefetchable =
-    await anySegmentHasRuntimePrefetchEnabled(tree)
+  // unstable_instant (runtime prefetch) requires cacheComponents. Skip the
+  // expensive module-loading tree walk when cacheComponents is disabled.
+  const metadataIsRuntimePrefetchable = ctx.renderOpts.cacheComponents
+    ? await anySegmentHasRuntimePrefetchEnabled(tree)
+    : false
   const { Viewport, Metadata, MetadataOutlet } = createMetadataComponents({
     tree,
     // When it's using global-not-found, metadata errorType is undefined, which will retrieve the
@@ -1791,8 +1797,11 @@ async function getErrorRSCPayload(
   } = ctx
 
   const serveStreamingMetadata = !!ctx.renderOpts.serveStreamingMetadata
-  const metadataIsRuntimePrefetchable =
-    await anySegmentHasRuntimePrefetchEnabled(tree)
+  // unstable_instant (runtime prefetch) requires cacheComponents. Skip the
+  // expensive module-loading tree walk when cacheComponents is disabled.
+  const metadataIsRuntimePrefetchable = ctx.renderOpts.cacheComponents
+    ? await anySegmentHasRuntimePrefetchEnabled(tree)
+    : false
   const { Viewport, Metadata } = createMetadataComponents({
     tree,
     parsedQuery: query,
