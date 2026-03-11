@@ -138,12 +138,6 @@ const findSourceMapURL =
         .findSourceMapURLDEV
     : undefined
 
-// Tracks which root params each cache function has historically read.
-// Used to compute the specific cache key upfront on subsequent invocations.
-// In-memory only — after server restart, the coarse-key redirect entry
-// in the cache handler provides fallback.
-const knownRootParamsByFunctionId = new Map<string, Set<string>>()
-
 const nestedCacheZeroRevalidateErrorMessage =
   `A "use cache" with zero \`revalidate\` is nested inside another "use cache" ` +
   `that has no explicit \`cacheLife\`, which is not allowed during ` +
@@ -159,6 +153,28 @@ const nestedCacheShortExpireErrorMessage =
   `to choose whether it should be prerendered (with longer \`expire\`) or remain ` +
   `dynamic (with short \`expire\`). Read more: ` +
   `https://nextjs.org/docs/messages/nested-use-cache-no-explicit-cachelife`
+
+// Tracks which root params each cache function has historically read. Used to
+// compute the specific cache key upfront on subsequent invocations. In-memory
+// only — after server restart, the coarse-key redirect entry in the cache
+// handler provides fallback.
+const knownRootParamsByFunctionId = new Map<string, Set<string>>()
+
+function addKnownRootParamNames(
+  id: string,
+  names: ReadonlySet<string>
+): Set<string> {
+  const existing = knownRootParamsByFunctionId.get(id)
+  if (existing) {
+    for (const name of names) {
+      existing.add(name)
+    }
+    return existing
+  }
+  const created = new Set(names)
+  knownRootParamsByFunctionId.set(id, created)
+  return created
+}
 
 function computeRootParamsCacheKeySuffix(
   rootParams: Params,
@@ -207,10 +223,18 @@ function saveToCacheHandler(
   const pendingCoarseEntry = savedCacheResult.then((collectedResult) => {
     const { entry: fullEntry, readRootParamNames } = collectedResult
 
-    if (readRootParamNames && readRootParamNames.size > 0 && rootParams) {
+    // Use the combined set (union of all historically observed reads) for both
+    // the specific key and the redirect entry's tags. Even if this invocation
+    // read no root params, a previous invocation may have — and we need to
+    // match the lookup key from that union.
+    const rootParamNames = readRootParamNames
+      ? addKnownRootParamNames(id, readRootParamNames)
+      : knownRootParamsByFunctionId.get(id)
+
+    if (rootParamNames && rootParamNames.size > 0 && rootParams) {
       const specificKey =
         serializedCacheKey +
-        computeRootParamsCacheKeySuffix(rootParams, readRootParamNames)
+        computeRootParamsCacheKeySuffix(rootParams, rootParamNames)
 
       const specificSetPromise = cacheHandler.set(
         specificKey,
@@ -218,13 +242,12 @@ function saveToCacheHandler(
       )
       workStore.pendingRevalidateWrites ??= []
       workStore.pendingRevalidateWrites.push(specificSetPromise)
-      knownRootParamsByFunctionId.set(id, new Set(readRootParamNames))
 
       // Return a redirect entry for the coarse key. On a cold server (empty
       // knownRootParamsByFunctionId), this entry's tags tell us which root
       // params to include in the specific key for the follow-up lookup.
 
-      const rootParamTags = [...readRootParamNames].map(
+      const rootParamTags = [...rootParamNames].map(
         (paramName) => NEXT_CACHE_ROOT_PARAM_TAG_ID + paramName
       )
 
@@ -1654,13 +1677,9 @@ export async function cache(
 
         if (
           rdcResult.readRootParamNames &&
-          rdcResult.readRootParamNames.size > 0 &&
-          !knownRootParamsByFunctionId.has(id)
+          rdcResult.readRootParamNames.size > 0
         ) {
-          knownRootParamsByFunctionId.set(
-            id,
-            new Set(rdcResult.readRootParamNames)
-          )
+          addKnownRootParamNames(id, rdcResult.readRootParamNames)
         }
 
         // We want to make sure we only propagate cache life & tags if the
@@ -1767,7 +1786,7 @@ export async function cache(
           }
         }
         if (paramNames.size > 0) {
-          knownRootParamsByFunctionId.set(id, paramNames)
+          addKnownRootParamNames(id, paramNames)
           cacheHandlerKey =
             serializedCacheKey +
             computeRootParamsCacheKeySuffix(rootParams, paramNames)
