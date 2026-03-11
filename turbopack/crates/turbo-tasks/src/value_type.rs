@@ -6,6 +6,7 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
+use smallvec::SmallVec;
 use tracing::Span;
 use turbo_bincode::{AnyDecodeFn, AnyEncodeFn};
 
@@ -14,7 +15,7 @@ use crate::{
     id::TraitTypeId,
     macro_helpers::{CollectableTraitMethods, NativeFunction},
     magic_any::any_as_encode,
-    registry::{self, RegistryType, get_trait_type_id, turbo_registry},
+    registry::{RegistryType, get_trait_type_id, turbo_registry},
     task::shared_reference::TypedSharedReference,
     vc::VcCellMode,
 };
@@ -65,11 +66,11 @@ impl Display for ValueType {
 }
 
 struct ValueTypeTraits {
-    /// Flat array indexed by TraitTypeId (1-based, so index 0 corresponds to TraitTypeId 1).
-    /// Length equals the total number of registered trait types.
-    /// `None` entry means this value type does not implement that trait.
-    /// The outer Option is None before init, Some after init.
-    traits: Option<Box<[Option<&'static [&'static NativeFunction]>]>>,
+    /// Trait type IDs that this value type implements, stored as raw u16.
+    /// Used for lookup: linear scan to find the index, then index into `vtables`.
+    trait_ids: SmallVec<[u16; 8]>,
+    /// Vtables corresponding 1:1 with `trait_ids`.
+    vtables: Vec<&'static [&'static NativeFunction]>,
 }
 
 pub trait ManualEncodeWrapper: Encode {
@@ -148,7 +149,10 @@ impl ValueType {
             ty: RegistryType::new::<T>(std::any::type_name::<T>(), global_name),
             bincode,
             raw_cell: <T::CellMode as VcCellMode<T>>::raw_cell,
-            traits: SyncUnsafeCell::new(ValueTypeTraits { traits: None }),
+            traits: SyncUnsafeCell::new(ValueTypeTraits {
+                trait_ids: SmallVec::new_const(),
+                vtables: Vec::new(),
+            }),
         }
     }
 
@@ -175,9 +179,10 @@ impl ValueType {
         &self,
         trait_method: &'static TraitMethod,
     ) -> Option<&'static NativeFunction> {
-        let trait_type_id = trait_method.trait_type_id();
-        let vtable = self.trait_info().traits.as_ref()?[*trait_type_id as usize - 1]?;
-        Some(vtable[trait_method.index as usize])
+        let trait_type_id = *trait_method.trait_type_id();
+        let info = self.trait_info();
+        let idx = info.trait_ids.iter().position(|&id| id == trait_type_id)?;
+        Some(info.vtables[idx][trait_method.index as usize])
     }
 
     fn register_trait(
@@ -187,19 +192,15 @@ impl ValueType {
     ) {
         // SAFETY: Called only during single-threaded registry init
         let traits = unsafe { &mut *self.traits.get() };
-        let trait_type_id = get_trait_type_id(trait_type);
-        let array = traits
-            .traits
-            .get_or_insert_with(|| vec![None; registry::trait_type_count()].into_boxed_slice());
-        array[*trait_type_id as usize - 1] = Some(trait_methods);
+        let trait_type_id = *get_trait_type_id(trait_type);
+        traits.trait_ids.push(trait_type_id);
+        traits.vtables.push(trait_methods);
     }
 
     #[inline]
     pub fn has_trait(&self, trait_type: &TraitTypeId) -> bool {
-        self.trait_info()
-            .traits
-            .as_ref()
-            .is_some_and(|t| t[**trait_type as usize - 1].is_some())
+        let raw = **trait_type;
+        self.trait_info().trait_ids.contains(&raw)
     }
 }
 
