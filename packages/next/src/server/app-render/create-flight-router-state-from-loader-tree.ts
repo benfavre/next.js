@@ -11,7 +11,8 @@ async function createFlightRouterStateFromLoaderTreeImpl(
   loaderTree: LoaderTree,
   getDynamicParamFromSegment: GetDynamicParamFromSegment,
   searchParams: any,
-  didFindRootLayout: boolean
+  didFindRootLayout: boolean,
+  needsInstantConfig: boolean
 ): Promise<FlightRouterState> {
   const [segment, parallelRoutes, { layout, loading, page }] = loaderTree
   const dynamicParam = getDynamicParamFromSegment(loaderTree)
@@ -22,23 +23,27 @@ async function createFlightRouterStateFromLoaderTreeImpl(
     {},
   ]
 
-  // Kick off module loading and all child tree traversals concurrently.
-  // Previously these were sequential: module load blocked children, and
-  // children were awaited one-by-one in a for...in loop. On cold start
-  // with many segments this caused cascading awaits for module loading.
-  const modPromise = layout
-    ? layout[0]()
-    : page
-      ? page[0]()
-      : Promise.resolve(undefined)
+  // Only load the module when cacheComponents is enabled (i.e. unstable_instant
+  // could be exported). Otherwise skip the import entirely — on cold start this
+  // avoids loading every segment's layout/page module just to read a config flag
+  // that doesn't exist.
+  const modPromise = needsInstantConfig
+    ? layout
+      ? layout[0]()
+      : page
+        ? page[0]()
+        : Promise.resolve(undefined)
+    : Promise.resolve(undefined)
 
+  // Kick off module loading and all child tree traversals concurrently.
   const parallelRouteKeys = Object.keys(parallelRoutes)
   const childPromises = parallelRouteKeys.map((key) =>
     createFlightRouterStateFromLoaderTreeImpl(
       parallelRoutes[key],
       getDynamicParamFromSegment,
       searchParams,
-      didFindRootLayout || typeof layout !== 'undefined'
+      didFindRootLayout || typeof layout !== 'undefined',
+      needsInstantConfig
     )
   )
 
@@ -103,30 +108,38 @@ async function createFlightRouterStateFromLoaderTreeImpl(
 export async function createFlightRouterStateFromLoaderTree(
   loaderTree: LoaderTree,
   getDynamicParamFromSegment: GetDynamicParamFromSegment,
-  searchParams: any
+  searchParams: any,
+  cacheComponents?: boolean
 ): Promise<FlightRouterState> {
   const didFindRootLayout = false
+  // Only load modules for instant config when cacheComponents is enabled,
+  // since unstable_instant requires cacheComponents.
+  const needsInstantConfig = !!cacheComponents
   return createFlightRouterStateFromLoaderTreeImpl(
     loaderTree,
     getDynamicParamFromSegment,
     searchParams,
-    didFindRootLayout
+    didFindRootLayout,
+    needsInstantConfig
   )
 }
 
 export async function createRouteTreePrefetch(
   loaderTree: LoaderTree,
-  getDynamicParamFromSegment: GetDynamicParamFromSegment
+  getDynamicParamFromSegment: GetDynamicParamFromSegment,
+  cacheComponents?: boolean
 ): Promise<FlightRouterState> {
   // Search params should not be added to page segment's cache key during a
   // route tree prefetch request, because they do not affect the structure of
   // the route. The client cache has its own logic to handle search params.
   const searchParams = {}
   const didFindRootLayout = false
+  const needsInstantConfig = !!cacheComponents
   return createFlightRouterStateFromLoaderTreeImpl(
     loaderTree,
     getDynamicParamFromSegment,
     searchParams,
-    didFindRootLayout
+    didFindRootLayout,
+    needsInstantConfig
   )
 }
