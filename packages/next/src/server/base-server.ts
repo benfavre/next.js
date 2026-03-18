@@ -1545,14 +1545,11 @@ export default abstract class Server<
         }
         parsedUrl.pathname = normalizeResult.pathname
 
-        for (const key of Object.keys(parsedUrl.query)) {
-          delete parsedUrl.query[key]
-        }
+        // Replace the query object instead of loop-deleting every key.
+        // Using `delete` on object properties mutates V8 hidden classes,
+        // which de-optimises inline caches on downstream property accesses.
         const invokeQuery = getRequestMeta(req, 'invokeQuery')
-
-        if (invokeQuery) {
-          Object.assign(parsedUrl.query, invokeQuery)
-        }
+        parsedUrl.query = invokeQuery ? { ...invokeQuery } : {}
 
         finished = await this.normalizeAndAttachMetadata(req, res, parsedUrl)
         if (finished) return
