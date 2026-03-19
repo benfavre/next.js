@@ -115,12 +115,6 @@ async function streamToChunks(
 }
 
 function concatUint8Arrays(chunks: Array<Uint8Array>): Uint8Array {
-  // Buffer.concat uses a native C++ implementation that avoids the
-  // intermediate JS-heap allocation + copy loop. ~2-3x faster on Node.js.
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.concat(chunks as Buffer[])
-  }
-  // Fallback for edge runtime where Buffer is not available.
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
   const result = new Uint8Array(totalLength)
   let offset = 0
@@ -129,18 +123,6 @@ function concatUint8Arrays(chunks: Array<Uint8Array>): Uint8Array {
     offset += chunk.length
   }
   return result
-}
-
-/**
- * Allocate a Uint8Array of `size` bytes. On Node.js this uses
- * Buffer.allocUnsafe which skips zero-filling — safe when the caller
- * immediately overwrites every byte (e.g. via .set()).
- */
-function allocUint8Array(size: number): Uint8Array {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.allocUnsafe(size)
-  }
-  return new Uint8Array(size)
 }
 
 export async function streamToUint8Array(
@@ -197,12 +179,14 @@ export function createBufferedTransformStream(
         return
       }
 
-      // Fast path: single chunk needs no merging at all.
-      const chunk =
-        bufferedChunks.length === 1
-          ? bufferedChunks[0]
-          : concatUint8Arrays(bufferedChunks)
+      const chunk = new Uint8Array(bufferByteLength)
+      let copiedBytes = 0
 
+      for (let i = 0; i < bufferedChunks.length; i++) {
+        const bufferedChunk = bufferedChunks[i]
+        chunk.set(bufferedChunk, copiedBytes)
+        copiedBytes += bufferedChunk.byteLength
+      }
       // We just wrote all the buffered chunks so we need to reset the bufferedChunks array
       // and our bufferByteLength to prepare for the next round of buffered chunks
       bufferedChunks.length = 0
@@ -342,7 +326,7 @@ function createMetadataTransformStream(
           // We do not need to insert the script tag in this case because it's in the head.
           // Just remove the icon mark from the chunk.
           if (iconMarkIndex < closedHeadIndex) {
-            const replaced = allocUint8Array(chunk.length - iconMarkLength)
+            const replaced = new Uint8Array(chunk.length - iconMarkLength)
 
             // Remove the icon mark from the chunk.
             replaced.set(chunk.subarray(0, iconMarkIndex))
@@ -356,7 +340,7 @@ function createMetadataTransformStream(
             const insertion = await insert()
             const encodedInsertion = encoder.encode(insertion)
             const insertionLength = encodedInsertion.length
-            const replaced = allocUint8Array(
+            const replaced = new Uint8Array(
               chunk.length - iconMarkLength + insertionLength
             )
             replaced.set(chunk.subarray(0, iconMarkIndex))
@@ -377,7 +361,7 @@ function createMetadataTransformStream(
         const encodedInsertion = encoder.encode(insertion)
         const insertionLength = encodedInsertion.length
         // Replace the icon mark with the hoist script or empty string.
-        const replaced = allocUint8Array(
+        const replaced = new Uint8Array(
           chunk.length - iconMarkLength + insertionLength
         )
         // Set the first part of the chunk, before the icon mark.
@@ -431,16 +415,16 @@ function createHeadInsertionTransformStream(
             // chunk = <head><meta charset="utf-8"></head>
             // insertion = <script>...</script>
             // output = <head><meta charset="utf-8"> [ <script>...</script> ] </head>
-            const insertedHeadContent = allocUint8Array(
+            const insertedHeadContent = new Uint8Array(
               chunk.length + encodedInsertion.length
             )
             // Append the first part of the chunk, before the head tag
-            insertedHeadContent.set(chunk.subarray(0, index))
+            insertedHeadContent.set(chunk.slice(0, index))
             // Append the server inserted content
             insertedHeadContent.set(encodedInsertion, index)
             // Append the rest of the chunk
             insertedHeadContent.set(
-              chunk.subarray(index),
+              chunk.slice(index),
               index + encodedInsertion.length
             )
             controller.enqueue(insertedHeadContent)
@@ -489,9 +473,6 @@ function createClientResumeScriptInsertionTransformStream(): TransformStream<
   const searchStr = `${NEXT_RSC_UNION_QUERY}=${cacheBustingHeader}`
   const NEXT_CLIENT_RESUME_SCRIPT = `<script>__NEXT_CLIENT_RESUME=fetch(location.pathname+'?${searchStr}',{credentials:'same-origin',headers:{'${RSC_HEADER}': '1','${NEXT_ROUTER_PREFETCH_HEADER}': '1','${NEXT_ROUTER_SEGMENT_PREFETCH_HEADER}': '${segmentPath}'}})</script>`
 
-  // Cache the encoded script — it's a static string computed once per stream.
-  const encodedInsertion = encoder.encode(NEXT_CLIENT_RESUME_SCRIPT)
-
   let didAlreadyInsert = false
   return new TransformStream({
     transform(chunk, controller) {
@@ -513,21 +494,22 @@ function createClientResumeScriptInsertionTransformStream(): TransformStream<
         return
       }
 
+      const encodedInsertion = encoder.encode(NEXT_CLIENT_RESUME_SCRIPT)
       // Get the total count of the bytes in the chunk and the insertion
       // e.g.
       // chunk = <head><meta charset="utf-8"></head>
       // insertion = <script>...</script>
       // output = <head><meta charset="utf-8"> [ <script>...</script> ] </head>
-      const insertedHeadContent = allocUint8Array(
+      const insertedHeadContent = new Uint8Array(
         chunk.length + encodedInsertion.length
       )
       // Append the first part of the chunk, before the head tag
-      insertedHeadContent.set(chunk.subarray(0, headClosingTagIndex))
+      insertedHeadContent.set(chunk.slice(0, headClosingTagIndex))
       // Append the server inserted content
       insertedHeadContent.set(encodedInsertion, headClosingTagIndex)
       // Append the rest of the chunk
       insertedHeadContent.set(
-        chunk.subarray(headClosingTagIndex),
+        chunk.slice(headClosingTagIndex),
         headClosingTagIndex + encodedInsertion.length
       )
 
@@ -569,9 +551,6 @@ export function createInstantTestScriptInsertionTransformStream(
     requestId !== null ? `self.__next_r=${JSON.stringify(requestId)};` : ''
   const INSTANT_TEST_SCRIPT = `<script>${requestIdScript}self.__next_instant_test=fetch(location.pathname+'?${searchStr}',{credentials:'same-origin',headers:{'${RSC_HEADER}':'1','${NEXT_ROUTER_PREFETCH_HEADER}':'1','${NEXT_ROUTER_SEGMENT_PREFETCH_HEADER}':'${segmentPath}','${NEXT_INSTANT_PREFETCH_HEADER}':'1'}})</script>`
 
-  // Cache the encoded script — it's a static string computed once per stream.
-  const encodedInsertion = encoder.encode(INSTANT_TEST_SCRIPT)
-
   let didAlreadyInsert = false
   return new TransformStream({
     transform(chunk, controller) {
@@ -599,18 +578,19 @@ export function createInstantTestScriptInsertionTransformStream(
         return
       }
 
+      const encodedInsertion = encoder.encode(INSTANT_TEST_SCRIPT)
       const insertionPoint = headCloseAngle + 1
       // e.g.
       // chunk = <!DOCTYPE html><html><head><meta charset="utf-8">...
       // insertion = <script>self.__next_instant_test=fetch(...)</script>
       // output = <!DOCTYPE html><html><head> [ <script>...</script> ] <meta charset="utf-8">...
-      const insertedHeadContent = allocUint8Array(
+      const insertedHeadContent = new Uint8Array(
         chunk.length + encodedInsertion.length
       )
-      insertedHeadContent.set(chunk.subarray(0, insertionPoint))
+      insertedHeadContent.set(chunk.slice(0, insertionPoint))
       insertedHeadContent.set(encodedInsertion, insertionPoint)
       insertedHeadContent.set(
-        chunk.subarray(insertionPoint),
+        chunk.slice(insertionPoint),
         insertionPoint + encodedInsertion.length
       )
 
@@ -836,9 +816,6 @@ function createStripDocumentClosingTagsTransform(): TransformStream<
 function createHtmlDataDplIdTransformStream(
   dplId: string
 ): TransformStream<Uint8Array, Uint8Array> {
-  // Cache the encoded attribute — dplId is constant for the lifetime of the stream.
-  const encodedAttribute = encoder.encode(` data-dpl-id="${dplId}"`)
-
   let didTransform = false
 
   return new TransformStream({
@@ -856,7 +833,9 @@ function createHtmlDataDplIdTransformStream(
 
       // Insert the data-dpl-id attribute right after "<html "
       const insertionPoint = htmlTagIndex + ENCODED_TAGS.OPENING.HTML.length
-      const modifiedChunk = allocUint8Array(
+      const attribute = ` data-dpl-id="${dplId}"`
+      const encodedAttribute = encoder.encode(attribute)
+      const modifiedChunk = new Uint8Array(
         chunk.length + encodedAttribute.length
       )
 
@@ -932,210 +911,6 @@ export function createRootLayoutValidatorStream(): TransformStream<
   })
 }
 
-/**
- * Merges the deployment-ID insertion, metadata icon-mark handling, and
- * root-layout validation into a single TransformStream.
- *
- * Each of these operations works on the first few chunks and then becomes a
- * pure pass-through, so fusing them avoids creating up to 3 extra
- * TransformStream objects (each with its own ReadableStream + WritableStream +
- * internal queues + backpressure bookkeeping) per request.
- */
-function createUnifiedHeadTransform(options: {
-  deploymentId?: string
-  getServerInsertedMetadata: () => Promise<string> | string
-  validateRootLayout?: boolean
-}): TransformStream<Uint8Array, Uint8Array> {
-  // --- dplId state ---
-  const hasDplId = !!options.deploymentId
-  let dplIdDone = !hasDplId
-
-  // --- metadata state ---
-  let metadataChunkIndex = -1
-  let metadataMarkRemoved = false
-
-  // --- root layout validator state ---
-  const doValidate = !!options.validateRootLayout
-  let foundHtml = false
-  let foundBody = false
-  let validatorDone = !doValidate
-
-  // Fast-path flag: once every one-shot operation is complete we skip all
-  // search work and just forward chunks unchanged.
-  let allDone = false
-
-  return new TransformStream({
-    async transform(chunk, controller) {
-      // --- fast path: all one-shot work is done ---
-      if (allDone) {
-        controller.enqueue(chunk)
-        return
-      }
-
-      let processedChunk = chunk
-
-      // ---------------------------------------------------------------
-      // 1. Insert data-dpl-id attribute on the <html> tag (first chunk)
-      // ---------------------------------------------------------------
-      if (!dplIdDone) {
-        const htmlTagIndex = indexOfUint8Array(
-          processedChunk,
-          ENCODED_TAGS.OPENING.HTML
-        )
-        if (htmlTagIndex !== -1) {
-          const insertionPoint =
-            htmlTagIndex + ENCODED_TAGS.OPENING.HTML.length
-          const attribute = ` data-dpl-id="${options.deploymentId}"`
-          const encodedAttribute = encoder.encode(attribute)
-          const modifiedChunk = new Uint8Array(
-            processedChunk.length + encodedAttribute.length
-          )
-          modifiedChunk.set(processedChunk.subarray(0, insertionPoint))
-          modifiedChunk.set(encodedAttribute, insertionPoint)
-          modifiedChunk.set(
-            processedChunk.subarray(insertionPoint),
-            insertionPoint + encodedAttribute.length
-          )
-          processedChunk = modifiedChunk
-          dplIdDone = true
-        }
-      }
-
-      // ---------------------------------------------------------------
-      // 2. Metadata icon-mark handling
-      // ---------------------------------------------------------------
-      if (!metadataMarkRemoved) {
-        metadataChunkIndex++
-
-        const iconMarkIndex = indexOfUint8Array(
-          processedChunk,
-          ENCODED_TAGS.META.ICON_MARK
-        )
-
-        if (iconMarkIndex !== -1) {
-          // Determine the full length of the icon mark tag (including > or />)
-          let iconMarkLength = ENCODED_TAGS.META.ICON_MARK.length
-          if (processedChunk[iconMarkIndex + iconMarkLength] === 47) {
-            // xml self-closing: />
-            iconMarkLength += 2
-          } else {
-            // html: >
-            iconMarkLength++
-          }
-
-          if (metadataChunkIndex === 0) {
-            const closedHeadIndex = indexOfUint8Array(
-              processedChunk,
-              ENCODED_TAGS.CLOSED.HEAD
-            )
-            if (iconMarkIndex < closedHeadIndex) {
-              // Icon mark is inside <head>, just remove it
-              const replaced = new Uint8Array(
-                processedChunk.length - iconMarkLength
-              )
-              replaced.set(processedChunk.subarray(0, iconMarkIndex))
-              replaced.set(
-                processedChunk.subarray(iconMarkIndex + iconMarkLength),
-                iconMarkIndex
-              )
-              processedChunk = replaced
-            } else {
-              // Icon mark is after </head>, replace with insertion
-              const insertion = await options.getServerInsertedMetadata()
-              const encodedInsertion = encoder.encode(insertion)
-              const insertionLength = encodedInsertion.length
-              const replaced = new Uint8Array(
-                processedChunk.length - iconMarkLength + insertionLength
-              )
-              replaced.set(processedChunk.subarray(0, iconMarkIndex))
-              replaced.set(encodedInsertion, iconMarkIndex)
-              replaced.set(
-                processedChunk.subarray(iconMarkIndex + iconMarkLength),
-                iconMarkIndex + insertionLength
-              )
-              processedChunk = replaced
-            }
-          } else {
-            // Non-first chunk: replace icon mark with insertion
-            const insertion = await options.getServerInsertedMetadata()
-            const encodedInsertion = encoder.encode(insertion)
-            const insertionLength = encodedInsertion.length
-            const replaced = new Uint8Array(
-              processedChunk.length - iconMarkLength + insertionLength
-            )
-            replaced.set(processedChunk.subarray(0, iconMarkIndex))
-            replaced.set(encodedInsertion, iconMarkIndex)
-            replaced.set(
-              processedChunk.subarray(iconMarkIndex + iconMarkLength),
-              iconMarkIndex + insertionLength
-            )
-            processedChunk = replaced
-          }
-          metadataMarkRemoved = true
-        } else {
-          // Icon mark not found in this chunk -- if metadata isn't done yet,
-          // continue searching in subsequent chunks (no modification needed).
-        }
-      }
-
-      // ---------------------------------------------------------------
-      // 3. Root layout validation (inspect only, no mutation)
-      // ---------------------------------------------------------------
-      if (!validatorDone) {
-        if (
-          !foundHtml &&
-          indexOfUint8Array(processedChunk, ENCODED_TAGS.OPENING.HTML) > -1
-        ) {
-          foundHtml = true
-        }
-        if (
-          !foundBody &&
-          indexOfUint8Array(processedChunk, ENCODED_TAGS.OPENING.BODY) > -1
-        ) {
-          foundBody = true
-        }
-        if (foundHtml && foundBody) {
-          validatorDone = true
-        }
-      }
-
-      // Check if all one-shot operations are now complete
-      if (dplIdDone && metadataMarkRemoved && validatorDone) {
-        allDone = true
-      }
-
-      controller.enqueue(processedChunk)
-    },
-
-    flush(controller) {
-      // Root layout validation: emit error template if tags are missing
-      if (doValidate) {
-        const missingTags: ('html' | 'body')[] = []
-        if (!foundHtml) missingTags.push('html')
-        if (!foundBody) missingTags.push('body')
-
-        if (missingTags.length) {
-          controller.enqueue(
-            encoder.encode(
-              `<html id="__next_error__">
-            <template
-              data-next-error-message="Missing ${missingTags
-                .map((c) => `<${c}>`)
-                .join(
-                  missingTags.length > 1 ? ' and ' : ''
-                )} tags in the root layout.\nRead more at https://nextjs.org/docs/messages/missing-root-layout-tags"
-              data-next-error-digest="${MISSING_ROOT_TAGS_ERROR}"
-              data-next-error-stack=""
-            ></template>
-          `
-            )
-          )
-        }
-      }
-    },
-  })
-}
-
 function chainTransformers<T>(
   readable: ReadableStream<T>,
   transformers: ReadonlyArray<TransformStream<T, T> | null>
@@ -1147,6 +922,396 @@ function chainTransformers<T>(
     stream = stream.pipeThrough(transformer)
   }
   return stream
+}
+
+/**
+ * Merged transform that combines buffering, deployment ID injection, metadata
+ * transformation, and root layout validation into a single TransformStream.
+ *
+ * Previously these were 4 separate TransformStreams chained together. Merging
+ * them eliminates 3 sets of writable+readable state machine overhead (~33μs
+ * each) for a total saving of ~100μs per dynamic request.
+ *
+ * The buffer accumulates incoming chunks and flushes them as a single merged
+ * Uint8Array via scheduleImmediate (same as the standalone buffer). On each
+ * flush, the merged chunk is processed through the DplId, Metadata, and
+ * Validator logic if they haven't completed yet. Once all three are done,
+ * subsequent flushes pass through unchanged.
+ */
+function createBufferedUnifiedTransform(options: {
+  deploymentId?: string
+  getServerInsertedMetadata: () => Promise<string> | string
+  validateRootLayout?: boolean
+}): TransformStream<Uint8Array, Uint8Array> {
+  // Buffer state (from createBufferedTransformStream)
+  let bufferedChunks: Array<Uint8Array> = []
+  let bufferByteLength: number = 0
+  let pending: DetachedPromise<void> | undefined
+
+  // DplId state (from createHtmlDataDplIdTransformStream)
+  let dplIdDone = !options.deploymentId
+
+  // Metadata state (from createMetadataTransformStream)
+  let metadataChunkIndex = -1
+  let metadataMarkRemoved = false
+
+  // Validator state (from createRootLayoutValidatorStream)
+  let foundHtml = false
+  let foundBody = false
+  const validatorEnabled = !!options.validateRootLayout
+
+  // When all one-time operations are done, we can skip processing
+  let allDone = false
+
+  function checkAllDone() {
+    if (dplIdDone && metadataMarkRemoved && (!validatorEnabled || (foundHtml && foundBody))) {
+      allDone = true
+    }
+  }
+
+  /**
+   * Process a merged chunk through DplId, Metadata, and Validator logic.
+   * Returns undefined for the synchronous fast path, or a Promise when
+   * the metadata insertion callback needs to be awaited.
+   */
+  function processChunk(
+    chunk: Uint8Array,
+    controller: TransformStreamDefaultController
+  ): Promise<void> | void {
+    if (allDone) {
+      controller.enqueue(chunk)
+      return
+    }
+
+    // --- DplId: insert data-dpl-id attribute on <html ---
+    if (!dplIdDone) {
+      const htmlTagIndex = indexOfUint8Array(chunk, ENCODED_TAGS.OPENING.HTML)
+      if (htmlTagIndex !== -1) {
+        const insertionPoint =
+          htmlTagIndex + ENCODED_TAGS.OPENING.HTML.length
+        const attribute = ` data-dpl-id="${options.deploymentId}"`
+        const encodedAttribute = encoder.encode(attribute)
+        const modifiedChunk = new Uint8Array(
+          chunk.length + encodedAttribute.length
+        )
+        modifiedChunk.set(chunk.subarray(0, insertionPoint))
+        modifiedChunk.set(encodedAttribute, insertionPoint)
+        modifiedChunk.set(
+          chunk.subarray(insertionPoint),
+          insertionPoint + encodedAttribute.length
+        )
+        chunk = modifiedChunk
+        dplIdDone = true
+      }
+    }
+
+    // --- Metadata: find icon mark and insert metadata ---
+    if (!metadataMarkRemoved) {
+      metadataChunkIndex++
+
+      const iconMarkIndex = indexOfUint8Array(chunk, ENCODED_TAGS.META.ICON_MARK)
+      if (iconMarkIndex !== -1) {
+        let iconMarkLength = ENCODED_TAGS.META.ICON_MARK.length
+        // Check if next char is /, for xml mode
+        if (chunk[iconMarkIndex + iconMarkLength] === 47) {
+          iconMarkLength += 2
+        } else {
+          iconMarkLength++
+        }
+
+        if (metadataChunkIndex === 0) {
+          // First chunk: check if icon mark is before </head>
+          const closedHeadIndex = indexOfUint8Array(
+            chunk,
+            ENCODED_TAGS.CLOSED.HEAD
+          )
+          if (iconMarkIndex < closedHeadIndex) {
+            // Icon mark is inside <head>, just remove it
+            const replaced = new Uint8Array(chunk.length - iconMarkLength)
+            replaced.set(chunk.subarray(0, iconMarkIndex))
+            replaced.set(
+              chunk.subarray(iconMarkIndex + iconMarkLength),
+              iconMarkIndex
+            )
+            chunk = replaced
+            metadataMarkRemoved = true
+          } else {
+            // Icon mark is after </head>, need async insertion
+            return processMetadataInsertion(chunk, iconMarkIndex, iconMarkLength, controller)
+          }
+        } else {
+          // Later chunks: need async insertion
+          return processMetadataInsertion(chunk, iconMarkIndex, iconMarkLength, controller)
+        }
+      }
+    }
+
+    // --- Validator: scan for <html and <body tags ---
+    applyValidator(chunk)
+
+    checkAllDone()
+    controller.enqueue(chunk)
+  }
+
+  /**
+   * Async path for metadata insertion — only called when the icon mark is
+   * found and needs to be replaced with the metadata callback result.
+   */
+  async function processMetadataInsertion(
+    chunk: Uint8Array,
+    iconMarkIndex: number,
+    iconMarkLength: number,
+    controller: TransformStreamDefaultController
+  ): Promise<void> {
+    const insertion = await options.getServerInsertedMetadata()
+    const encodedInsertion = encoder.encode(insertion)
+    const insertionLength = encodedInsertion.length
+    const replaced = new Uint8Array(
+      chunk.length - iconMarkLength + insertionLength
+    )
+    replaced.set(chunk.subarray(0, iconMarkIndex))
+    replaced.set(encodedInsertion, iconMarkIndex)
+    replaced.set(
+      chunk.subarray(iconMarkIndex + iconMarkLength),
+      iconMarkIndex + insertionLength
+    )
+    metadataMarkRemoved = true
+
+    applyValidator(replaced)
+    checkAllDone()
+    controller.enqueue(replaced)
+  }
+
+  function applyValidator(chunk: Uint8Array) {
+    if (!validatorEnabled) return
+    if (
+      !foundHtml &&
+      indexOfUint8Array(chunk, ENCODED_TAGS.OPENING.HTML) > -1
+    ) {
+      foundHtml = true
+    }
+    if (
+      !foundBody &&
+      indexOfUint8Array(chunk, ENCODED_TAGS.OPENING.BODY) > -1
+    ) {
+      foundBody = true
+    }
+  }
+
+  const flush = (controller: TransformStreamDefaultController) => {
+    if (bufferedChunks.length === 0) return
+
+    // Merge buffered chunks into a single Uint8Array
+    const merged = new Uint8Array(bufferByteLength)
+    let copiedBytes = 0
+    for (let i = 0; i < bufferedChunks.length; i++) {
+      const bufferedChunk = bufferedChunks[i]
+      merged.set(bufferedChunk, copiedBytes)
+      copiedBytes += bufferedChunk.byteLength
+    }
+    bufferedChunks.length = 0
+    bufferByteLength = 0
+
+    // Process through unified head logic, then enqueue
+    return processChunk(merged, controller)
+  }
+
+  const scheduleFlush = (controller: TransformStreamDefaultController) => {
+    if (pending) {
+      return
+    }
+
+    const detached = new DetachedPromise<void>()
+    pending = detached
+
+    scheduleImmediate(() => {
+      try {
+        const result = flush(controller)
+        if (result && typeof result.then === 'function') {
+          result.then(
+            () => {
+              pending = undefined
+              detached.resolve()
+            },
+            () => {
+              pending = undefined
+              detached.resolve()
+            }
+          )
+          return
+        }
+      } catch {
+        // If an error occurs while enqueuing, it can't be due to this
+        // transformer. It's most likely caused by the controller having been
+        // errored (for example, if the stream was cancelled).
+      }
+      pending = undefined
+      detached.resolve()
+    })
+  }
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      bufferedChunks.push(chunk)
+      bufferByteLength += chunk.byteLength
+      scheduleFlush(controller)
+    },
+    flush(controller) {
+      if (pending) {
+        return pending.promise.then(() => {
+          const result = flush(controller)
+          if (result && typeof result.then === 'function') {
+            return result.then(() => emitValidatorErrors(controller))
+          }
+          emitValidatorErrors(controller)
+        })
+      }
+      const result = flush(controller)
+      if (result && typeof result.then === 'function') {
+        return result.then(() => emitValidatorErrors(controller))
+      }
+      emitValidatorErrors(controller)
+    },
+  })
+
+  function emitValidatorErrors(
+    controller: TransformStreamDefaultController
+  ) {
+    if (!validatorEnabled) return
+
+    const missingTags: ('html' | 'body')[] = []
+    if (!foundHtml) missingTags.push('html')
+    if (!foundBody) missingTags.push('body')
+
+    if (!missingTags.length) return
+
+    controller.enqueue(
+      encoder.encode(
+        `<html id="__next_error__">
+            <template
+              data-next-error-message="Missing ${missingTags
+                .map((c) => `<${c}>`)
+                .join(
+                  missingTags.length > 1 ? ' and ' : ''
+                )} tags in the root layout.\nRead more at https://nextjs.org/docs/messages/missing-root-layout-tags"
+              data-next-error-digest="${MISSING_ROOT_TAGS_ERROR}"
+              data-next-error-stack=""
+            ></template>
+          `
+      )
+    )
+  }
+}
+
+/**
+ * Merged transform that combines suffix movement and head insertion into a
+ * single TransformStream.
+ *
+ * MoveSuffix strips `</body></html>` from the stream and re-appends it at the
+ * end. HeadInsertion inserts server-generated HTML before the first `</head>`.
+ * Both are one-time tag operations, so merging them into one transform
+ * eliminates one TransformStream (~33μs overhead).
+ */
+function createMoveSuffixAndHeadInsertionStream(
+  insert: () => Promise<string>
+): TransformStream<Uint8Array, Uint8Array> {
+  // MoveSuffix state
+  let foundSuffix = false
+
+  // HeadInsertion state
+  let headInserted = false
+  let hasBytes = false
+
+  return new TransformStream({
+    async transform(chunk, controller) {
+      hasBytes = true
+
+      // --- HeadInsertion: insert server HTML before </head> ---
+      if (!headInserted) {
+        const insertion = await insert()
+        const headIndex = indexOfUint8Array(chunk, ENCODED_TAGS.CLOSED.HEAD)
+        if (headIndex !== -1) {
+          if (insertion) {
+            const encodedInsertion = encoder.encode(insertion)
+            const insertedHeadContent = new Uint8Array(
+              chunk.length + encodedInsertion.length
+            )
+            insertedHeadContent.set(chunk.slice(0, headIndex))
+            insertedHeadContent.set(encodedInsertion, headIndex)
+            insertedHeadContent.set(
+              chunk.slice(headIndex),
+              headIndex + encodedInsertion.length
+            )
+            chunk = insertedHeadContent
+          }
+          headInserted = true
+        } else {
+          // PPR resume case: no </head> found, prepend insertion
+          if (insertion) {
+            controller.enqueue(encoder.encode(insertion))
+          }
+          headInserted = true
+        }
+      } else {
+        // Already inserted head content; check for any remaining insertion
+        const insertion = await insert()
+        if (insertion) {
+          controller.enqueue(encoder.encode(insertion))
+        }
+      }
+
+      // --- MoveSuffix: strip </body></html> and save for end ---
+      if (!foundSuffix) {
+        const index = indexOfUint8Array(
+          chunk,
+          ENCODED_TAGS.CLOSED.BODY_AND_HTML
+        )
+        if (index > -1) {
+          foundSuffix = true
+
+          // If the whole chunk is the suffix, don't write anything
+          if (chunk.length === ENCODED_TAGS.CLOSED.BODY_AND_HTML.length) {
+            return
+          }
+
+          // Write out the part before the suffix
+          const before = chunk.slice(0, index)
+
+          // Check if there's content after the suffix
+          if (
+            chunk.length >
+            ENCODED_TAGS.CLOSED.BODY_AND_HTML.length + index
+          ) {
+            const after = chunk.slice(
+              index + ENCODED_TAGS.CLOSED.BODY_AND_HTML.length
+            )
+            // Combine before + after (skipping the suffix)
+            const combined = new Uint8Array(before.length + after.length)
+            combined.set(before)
+            combined.set(after, before.length)
+            controller.enqueue(combined)
+          } else if (before.length > 0) {
+            controller.enqueue(before)
+          }
+          return
+        }
+      }
+
+      controller.enqueue(chunk)
+    },
+    async flush(controller) {
+      // Check for any remaining server HTML to insert
+      if (hasBytes) {
+        const insertion = await insert()
+        if (insertion) {
+          controller.enqueue(encoder.encode(insertion))
+        }
+      }
+
+      // Always re-append the closing tags at the end
+      controller.enqueue(ENCODED_TAGS.CLOSED.BODY_AND_HTML)
+    },
+  })
 }
 
 export type ContinueStreamOptions = {
@@ -1187,13 +1352,8 @@ export async function continueFizzStream(
   }
 
   return chainTransformers(renderStream, [
-    // Buffer everything to avoid flushing too frequently
-    createBufferedTransformStream(),
-
-    // Unified transform: merges deployment-ID insertion, metadata icon-mark
-    // handling, and root-layout validation into a single TransformStream to
-    // reduce per-request stream pipeline overhead.
-    createUnifiedHeadTransform({
+    // Buffer + DplId + Metadata + Validator in a single transform
+    createBufferedUnifiedTransform({
       deploymentId,
       getServerInsertedMetadata,
       validateRootLayout,
@@ -1209,13 +1369,8 @@ export async function continueFizzStream(
       ? createFlightDataInjectionTransformStream(inlinedDataStream, true)
       : null,
 
-    // Close tags should always be deferred to the end
-    createMoveSuffixStream(),
-
-    // Special head insertions
-    // TODO-APP: Insert server side html to end of head in app layout rendering, to avoid
-    // hydration errors. Remove this once it's ready to be handled by react itself.
-    createHeadInsertionTransformStream(getServerInsertedHTML),
+    // Move close tags to end + insert server HTML before </head>
+    createMoveSuffixAndHeadInsertionStream(getServerInsertedHTML),
   ])
 }
 
@@ -1237,13 +1392,12 @@ export async function continueDynamicPrerender(
     // Buffer everything to avoid flushing too frequently
     createBufferedTransformStream(),
     createStripDocumentClosingTagsTransform(),
-    // Unified transform: deployment-ID + metadata in a single stream
-    createUnifiedHeadTransform({
-      deploymentId,
-      getServerInsertedMetadata,
-    }),
+    // Insert data-dpl-id attribute on the html tag
+    deploymentId ? createHtmlDataDplIdTransformStream(deploymentId) : null,
     // Insert generated tags to head
     createHeadInsertionTransformStream(getServerInsertedHTML),
+    // Transform metadata
+    createMetadataTransformStream(getServerInsertedMetadata),
   ])
 }
 
@@ -1266,13 +1420,13 @@ export async function continueStaticPrerender(
   return chainTransformers(prerenderStream, [
     // Buffer everything to avoid flushing too frequently
     createBufferedTransformStream(),
+    // Add build id comment to start of the HTML document (in export mode)
+    // Insert data-dpl-id attribute on the html tag
+    deploymentId ? createHtmlDataDplIdTransformStream(deploymentId) : null,
     // Insert generated tags to head
     createHeadInsertionTransformStream(getServerInsertedHTML),
-    // Unified transform: deployment-ID + metadata in a single stream
-    createUnifiedHeadTransform({
-      deploymentId,
-      getServerInsertedMetadata,
-    }),
+    // Transform metadata
+    createMetadataTransformStream(getServerInsertedMetadata),
     // Insert the inlined data (Flight data, form state, etc.) stream into the HTML
     createFlightDataInjectionTransformStream(inlinedDataStream, true),
     // Close tags should always be deferred to the end
@@ -1295,15 +1449,14 @@ export async function continueStaticFallbackPrerender(
   return chainTransformers(prerenderStream, [
     // Buffer everything to avoid flushing too frequently
     createBufferedTransformStream(),
+    // Insert data-dpl-id attribute on the html tag
+    deploymentId ? createHtmlDataDplIdTransformStream(deploymentId) : null,
     // Insert generated tags to head
     createHeadInsertionTransformStream(getServerInsertedHTML),
     // Insert the client resume script into the head
     createClientResumeScriptInsertionTransformStream(),
-    // Unified transform: deployment-ID + metadata in a single stream
-    createUnifiedHeadTransform({
-      deploymentId,
-      getServerInsertedMetadata,
-    }),
+    // Transform metadata
+    createMetadataTransformStream(getServerInsertedMetadata),
     // Insert the inlined data (Flight data, form state, etc.) stream into the HTML
     createFlightDataInjectionTransformStream(inlinedDataStream, true),
     // Close tags should always be deferred to the end
@@ -1332,13 +1485,12 @@ export async function continueDynamicHTMLResume(
   return chainTransformers(renderStream, [
     // Buffer everything to avoid flushing too frequently
     createBufferedTransformStream(),
+    // Insert data-dpl-id attribute on the html tag
+    deploymentId ? createHtmlDataDplIdTransformStream(deploymentId) : null,
     // Insert generated tags to head
     createHeadInsertionTransformStream(getServerInsertedHTML),
-    // Unified transform: deployment-ID + metadata in a single stream
-    createUnifiedHeadTransform({
-      deploymentId,
-      getServerInsertedMetadata,
-    }),
+    // Transform metadata
+    createMetadataTransformStream(getServerInsertedMetadata),
     // Insert the inlined data (Flight data, form state, etc.) stream into the HTML
     createFlightDataInjectionTransformStream(
       inlinedDataStream,
