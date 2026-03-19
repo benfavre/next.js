@@ -59,7 +59,7 @@ import {
 import { isDynamicRoute } from '../shared/lib/router/utils'
 import { execOnce } from '../shared/lib/utils'
 import { isBlockedPage } from './utils'
-import { getBotType } from '../shared/lib/router/utils/is-bot'
+import { getBotType, isBot } from '../shared/lib/router/utils/is-bot'
 import RenderResult from './render-result'
 import { removeTrailingSlash } from '../shared/lib/router/utils/remove-trailing-slash'
 import { denormalizePagePath } from '../shared/lib/page-path/denormalize-page-path'
@@ -158,26 +158,11 @@ import {
   readBodyWithSizeLimit,
 } from './lib/postponed-request-body'
 
-// Hoisted regex literals — avoids re-creation on every request.
-const DOUBLE_SLASH_OR_BACKSLASH_RE = /(\\|\/\/)/
-const INDEX_ROUTE_RE = /^\/index($|\?)/
-const INDEX_PREFIX_RE = /^\/index/
-const NEXT_ASSET_RE = /^\/_next\//
-const STATIC_DIR_RE = /^\/static\//
-const TRAILING_JSON_RE = /\.json$/
-
-/**
- * Extract the pathname (path before '?' or '#') from a relative URL string.
- * Avoids the ~4 μs overhead of `new URL(value, 'http://localhost')`.
- */
-function getPathname(url: string): string {
-  const qIdx = url.indexOf('?')
-  const hIdx = url.indexOf('#')
-  if (qIdx === -1 && hIdx === -1) return url
-  if (qIdx === -1) return url.slice(0, hIdx)
-  if (hIdx === -1) return url.slice(0, qIdx)
-  return url.slice(0, Math.min(qIdx, hIdx))
-}
+// Pre-compute Vary header strings at module level to avoid repeated string
+// concatenation on every request. These are constant values derived from
+// header name constants and never change at runtime.
+const STATIC_VARY_HEADER = `${RSC_HEADER}, ${NEXT_ROUTER_STATE_TREE_HEADER}, ${NEXT_ROUTER_PREFETCH_HEADER}, ${NEXT_ROUTER_SEGMENT_PREFETCH_HEADER}`
+const STATIC_VARY_HEADER_WITH_NEXT_URL = `${STATIC_VARY_HEADER}, ${NEXT_URL}`
 
 export type FindComponentsResult<
   NextModule extends GenericComponentMod = GenericComponentMod,
@@ -1004,7 +989,7 @@ export default abstract class Server<
       // hello/world or backslashes to forward slashes, this does not
       // handle trailing slash as that is handled the same as a next.config.js
       // redirect
-      if (urlNoQuery?.match(DOUBLE_SLASH_OR_BACKSLASH_RE)) {
+      if (urlNoQuery?.match(/(\\|\/\/)/)) {
         const cleanUrl = normalizeRepeatedSlashes(req.url!)
         res.redirect(cleanUrl, 308).body(cleanUrl).send()
         return
@@ -1081,8 +1066,8 @@ export default abstract class Server<
           if (this.enabledDirectories.app) {
             // ensure /index path is normalized for prerender
             // in minimal mode
-            if (INDEX_ROUTE_RE.test(req.url)) {
-              req.url = req.url.replace(INDEX_PREFIX_RE, '/')
+            if (req.url.match(/^\/index($|\?)/)) {
+              req.url = req.url.replace(/^\/index/, '/')
             }
             parsedUrl.pathname =
               parsedUrl.pathname === '/index' ? '/' : parsedUrl.pathname
@@ -1090,11 +1075,12 @@ export default abstract class Server<
 
           // x-matched-path is the source of truth, it tells what page
           // should be rendered because we don't process rewrites in minimalMode
-          let matchedPath = getPathname(
-            fixMojibake(req.headers[MATCHED_PATH_HEADER] as string)
+          let { pathname: matchedPath } = new URL(
+            fixMojibake(req.headers[MATCHED_PATH_HEADER] as string),
+            'http://localhost'
           )
 
-          let urlPathname = getPathname(req.url)
+          let { pathname: urlPathname } = new URL(req.url, 'http://localhost')
 
           // For ISR the URL is normalized to the prerenderPath so if
           // it's a data request the URL path will be the data URL,
@@ -1943,8 +1929,8 @@ export default abstract class Server<
       !internalRender &&
       !this.minimalMode &&
       !getRequestMeta(req, 'isNextDataReq') &&
-      ((req.url && NEXT_ASSET_RE.test(req.url)) ||
-        (this.hasStaticDir && STATIC_DIR_RE.test(req.url!)))
+      (req.url?.match(/^\/_next\//) ||
+        (this.hasStaticDir && req.url!.match(/^\/static\//)))
     ) {
       return this.handleRequest(req, res, parsedUrl)
     }
@@ -2015,7 +2001,6 @@ export default abstract class Server<
     isAppPath: boolean,
     resolvedPathname: string
   ): void {
-    const baseVaryHeader = `${RSC_HEADER}, ${NEXT_ROUTER_STATE_TREE_HEADER}, ${NEXT_ROUTER_PREFETCH_HEADER}, ${NEXT_ROUTER_SEGMENT_PREFETCH_HEADER}`
     const isRSCRequest = getRequestMeta(req, 'isRSCRequest') ?? false
 
     let addedNextUrlToVary = false
@@ -2023,12 +2008,12 @@ export default abstract class Server<
     if (isAppPath && this.pathCouldBeIntercepted(resolvedPathname)) {
       // Interception route responses can vary based on the `Next-URL` header.
       // We use the Vary header to signal this behavior to the client to properly cache the response.
-      res.appendHeader('vary', `${baseVaryHeader}, ${NEXT_URL}`)
+      res.appendHeader('vary', STATIC_VARY_HEADER_WITH_NEXT_URL)
       addedNextUrlToVary = true
     } else if (isAppPath || isRSCRequest) {
       // We don't need to include `Next-URL` in the Vary header for non-interception routes since it won't affect the response.
       // We also set this header for pages to avoid caching issues when navigating between pages and app.
-      res.appendHeader('vary', baseVaryHeader)
+      res.appendHeader('vary', STATIC_VARY_HEADER)
     }
 
     if (!addedNextUrlToVary) {
@@ -2301,9 +2286,8 @@ export default abstract class Server<
     }
 
     if (opts.supportsDynamicResponse === true) {
-      // Derive from botType already computed in renderImpl — avoids a
-      // second regex test against the user-agent string.
-      const isBotRequest = opts.botType !== undefined
+      const ua = req.headers['user-agent'] || ''
+      const isBotRequest = isBot(ua)
       const isSupportedDocument =
         typeof components.Document?.getInitialProps !== 'function' ||
         // The built-in `Document` component also supports dynamic HTML for concurrent mode.
@@ -2491,7 +2475,7 @@ export default abstract class Server<
         filePath.indexOf(this.buildId) + this.buildId.length
       )
 
-      filePath = denormalizePagePath(splitPath.replace(TRAILING_JSON_RE, ''))
+      filePath = denormalizePagePath(splitPath.replace(/\.json$/, ''))
     }
 
     if (this.localeNormalizer && stripLocale) {
