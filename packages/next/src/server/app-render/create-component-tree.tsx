@@ -45,86 +45,6 @@ import type { AppSegmentConfig } from '../../build/segment-config/app/app-segmen
 import { RenderStage, type StagedRenderingController } from './staged-rendering'
 
 /**
- * A Set wrapper that defers copying its parent until the first mutation.
- * Reads (has, size, forEach, iteration) delegate to the parent Set.
- * On the first add() or delete(), it copies the parent into a real Set and
- * switches all subsequent operations to that copy.
- *
- * This avoids O(n) Set copy costs in the common case where a layout level
- * has no CSS/JS/fonts to inject — which is typical for most intermediate
- * segments in a layout tree. For a tree with 5+ segments and parallel
- * routes, this can eliminate 30+ unnecessary Set allocations per request.
- */
-class CopyOnWriteSet<T> {
-  private _parent: Set<T>
-  private _own: Set<T> | null
-
-  constructor(parent: Set<T>) {
-    this._parent = parent
-    this._own = null
-  }
-
-  private _materialize(): Set<T> {
-    if (this._own === null) {
-      this._own = new Set(this._parent)
-    }
-    return this._own
-  }
-
-  private _current(): Set<T> {
-    return this._own ?? this._parent
-  }
-
-  get size(): number {
-    return this._current().size
-  }
-
-  has(value: T): boolean {
-    return this._current().has(value)
-  }
-
-  add(value: T): this {
-    this._materialize().add(value)
-    return this
-  }
-
-  delete(value: T): boolean {
-    return this._materialize().delete(value)
-  }
-
-  clear(): void {
-    this._materialize().clear()
-  }
-
-  forEach(
-    callbackfn: (value: T, value2: T, set: Set<T>) => void,
-    thisArg?: any
-  ): void {
-    this._current().forEach(callbackfn, thisArg)
-  }
-
-  entries(): SetIterator<[T, T]> {
-    return this._current().entries()
-  }
-
-  keys(): SetIterator<T> {
-    return this._current().keys()
-  }
-
-  values(): SetIterator<T> {
-    return this._current().values()
-  }
-
-  [Symbol.iterator](): SetIterator<T> {
-    return this._current()[Symbol.iterator]()
-  }
-
-  get [Symbol.toStringTag](): string {
-    return 'CopyOnWriteSet'
-  }
-}
-
-/**
  * Use the provided loader tree to create the React Component tree.
  */
 // TODO convert these arguments to non-object form. the entrypoint doesn't need most of them
@@ -234,15 +154,11 @@ async function createComponentTreeInternal(
     unauthorized,
   } = modules
 
-  const injectedCSSWithCurrentLayout = new CopyOnWriteSet(
-    injectedCSS
-  ) as Set<string>
-  const injectedJSWithCurrentLayout = new CopyOnWriteSet(
-    injectedJS
-  ) as Set<string>
-  const injectedFontPreloadTagsWithCurrentLayout = new CopyOnWriteSet(
+  const injectedCSSWithCurrentLayout = new Set(injectedCSS)
+  const injectedJSWithCurrentLayout = new Set(injectedJS)
+  const injectedFontPreloadTagsWithCurrentLayout = new Set(
     injectedFontPreloadTags
-  ) as Set<string>
+  )
 
   const layerAssets = getLayerAssets({
     preloadCallbacks,
@@ -395,10 +311,13 @@ async function createComponentTreeInternal(
     validateRevalidate(layoutOrPageMod?.revalidate, workStore.route)
   }
 
+  // Cache the work unit store lookup once for use across the revalidate check,
+  // stale time check, and vary params accumulator below, avoiding redundant
+  // AsyncLocalStorage.getStore() calls per segment.
+  const workUnitStore = workUnitAsyncStorage.getStore()
+
   if (typeof layoutOrPageMod?.revalidate === 'number') {
     const defaultRevalidate = layoutOrPageMod.revalidate as number
-
-    const workUnitStore = workUnitAsyncStorage.getStore()
 
     if (workUnitStore) {
       switch (workUnitStore.type) {
@@ -419,6 +338,7 @@ async function createComponentTreeInternal(
         case 'prerender-client':
         case 'validation-client':
         case 'unstable-cache':
+        case 'generate-static-params':
           break
         default:
           workUnitStore satisfies never
@@ -437,6 +357,47 @@ async function createComponentTreeInternal(
       workStore.dynamicUsageDescription = dynamicUsageDescription
 
       throw new DynamicServerError(dynamicUsageDescription)
+    }
+  }
+
+  // Read unstable_dynamicStaleTime from page modules (not layouts) and track it on
+  // the store's stale field. This affects the segment cache stale time via
+  // the StaleTimeIterable.
+  if (
+    isPage &&
+    typeof layoutOrPageMod?.unstable_dynamicStaleTime === 'number'
+  ) {
+    const pageStaleTime = layoutOrPageMod.unstable_dynamicStaleTime
+
+    if (workUnitStore) {
+      switch (workUnitStore.type) {
+        case 'prerender':
+        case 'prerender-runtime':
+        case 'prerender-legacy':
+        case 'prerender-ppr':
+          if (workUnitStore.stale > pageStaleTime) {
+            workUnitStore.stale = pageStaleTime
+          }
+          break
+        case 'request':
+          if (
+            workUnitStore.stale === undefined ||
+            workUnitStore.stale > pageStaleTime
+          ) {
+            workUnitStore.stale = pageStaleTime
+          }
+          break
+        // createComponentTree is not called for these stores:
+        case 'cache':
+        case 'private-cache':
+        case 'prerender-client':
+        case 'validation-client':
+        case 'unstable-cache':
+        case 'generate-static-params':
+          break
+        default:
+          workUnitStore satisfies never
+      }
     }
   }
 
@@ -857,7 +818,7 @@ async function createComponentTreeInternal(
       ? // Client components with Cache Components enabled don't receive params
         // from the server, so they have an empty vary params set.
         emptyVaryParamsAccumulator
-      : createVaryParamsAccumulator()
+      : createVaryParamsAccumulator(workUnitStore)
 
   if (
     process.env.NODE_ENV === 'development' &&
@@ -1374,6 +1335,7 @@ function createSeedData(
         case 'cache':
         case 'private-cache':
         case 'unstable-cache':
+        case 'generate-static-params':
           break
         default:
           workUnitStore satisfies never
