@@ -208,10 +208,6 @@ export function getServerUtils({
   let dynamicRouteMatcher: RouteMatchFn | undefined
   let defaultRouteMatches: ParsedUrlQuery | undefined
 
-  // Pre-compute basePath regex so we don't allocate a new RegExp on every
-  // rewrite check inside handleRewrites.
-  const basePathRegex = basePath ? new RegExp(`^${basePath}`) : null
-
   if (pageIsDynamic) {
     defaultRouteRegex = getNamedRouteRegex(page, {
       prefixRouteKeys: false,
@@ -220,18 +216,31 @@ export function getServerUtils({
     defaultRouteMatches = dynamicRouteMatcher(page) as ParsedUrlQuery
   }
 
+  // Precompute whether any rewrites are configured to enable fast path
+  const hasRewrites =
+    (rewrites.beforeFiles && rewrites.beforeFiles.length > 0) ||
+    (rewrites.afterFiles && rewrites.afterFiles.length > 0) ||
+    (rewrites.fallback && rewrites.fallback.length > 0)
+
   function handleRewrites(
     req: BaseNextRequest | IncomingMessage,
     parsedUrl: DeepReadonly<NextUrlWithParsedQuery>
   ) {
-    // Shallow copy with a separate query copy to avoid mutating the original.
-    // structuredClone was the #1 non-React CPU hotspot (8.6% of CPU time)
-    // in production profiles — overkill for this flat URL object whose
-    // properties are all primitives plus a single-level query record.
-    const rewrittenParsedUrl: NextUrlWithParsedQuery = {
-      ...parsedUrl,
-      query: { ...parsedUrl.query },
+    // Fast path: when no rewrites are configured, skip the deep clone,
+    // closure creation, and array iteration entirely. The caller never
+    // mutates the returned URL in a way that would require a separate copy.
+    if (!hasRewrites) {
+      return {
+        rewriteParams: {} as Record<string, string>,
+        rewrittenParsedUrl: parsedUrl as NextUrlWithParsedQuery,
+      }
     }
+
+    // Here we deep clone the parsedUrl to avoid mutating the original. We also
+    // cast this to a mutable type so we can mutate it within this scope.
+    const rewrittenParsedUrl = structuredClone(
+      parsedUrl
+    ) as NextUrlWithParsedQuery
     const rewriteParams: Record<string, string> = {}
     let fsPathname = rewrittenParsedUrl.pathname
 
@@ -294,8 +303,8 @@ export function getServerUtils({
         fsPathname = rewrittenParsedUrl.pathname
         if (!fsPathname) return false
 
-        if (basePathRegex) {
-          fsPathname = fsPathname.replace(basePathRegex, '') || '/'
+        if (basePath) {
+          fsPathname = fsPathname.replace(new RegExp(`^${basePath}`), '') || '/'
         }
 
         if (i18n) {
@@ -426,6 +435,7 @@ export function getServerUtils({
 
   return {
     handleRewrites,
+    hasRewrites: !!hasRewrites,
     defaultRouteRegex,
     dynamicRouteMatcher,
     defaultRouteMatches,
