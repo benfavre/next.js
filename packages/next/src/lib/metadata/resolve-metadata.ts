@@ -232,7 +232,26 @@ async function mergeMetadata(
     leafSegmentStaticIcons: StaticIcons
   }
 ): Promise<ResolvedMetadata> {
-  const newResolvedMetadata = structuredClone(resolvedMetadata)
+  // Shallow-copy the top-level object, plus a targeted copy of nested objects
+  // that postProcessMetadata / inheritFromMetadata may mutate in-place
+  // (e.g. icons.icon.unshift, openGraph.title = ..., twitter Object.assign).
+  // A plain `{ ...resolvedMetadata }` would keep frozen inner references in
+  // dev mode (deepFreeze) and cause shared-state leaks in production.
+  const newResolvedMetadata: ResolvedMetadata = {
+    ...resolvedMetadata,
+    openGraph: resolvedMetadata.openGraph
+      ? { ...resolvedMetadata.openGraph }
+      : null,
+    twitter: resolvedMetadata.twitter
+      ? { ...resolvedMetadata.twitter }
+      : null,
+    icons: resolvedMetadata.icons
+      ? {
+          icon: [...resolvedMetadata.icons.icon],
+          apple: [...resolvedMetadata.icons.apple],
+        }
+      : null,
+  }
 
   const metadataBase = normalizeMetadataBase(
     metadata?.metadataBase !== undefined
@@ -456,7 +475,9 @@ function mergeViewport({
   resolvedViewport: ResolvedViewport
   viewport: Viewport | null
 }): ResolvedViewport {
-  const newResolvedViewport = structuredClone(resolvedViewport)
+  // Use a shallow copy instead of structuredClone. This is safe because
+  // every property below is fully replaced (never mutated in-place).
+  const newResolvedViewport: ResolvedViewport = { ...resolvedViewport }
 
   if (viewport) {
     for (const key_ in viewport) {
