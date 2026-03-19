@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactElement } from 'react'
 import type {
   CacheNodeSeedData,
   LoadingModuleData,
@@ -83,6 +83,15 @@ function errorMissingDefaultExport(
 }
 
 const cacheNodeKey = 'c'
+
+// Cache for createElement(RenderFromTemplateContext, null) — the result is always
+// the same immutable React element (no props, no children) so we avoid creating
+// identical objects on every segment × every request. Keyed on the component
+// reference so different bundles (edge vs node) stay isolated.
+const renderFromTemplateElementCache = new WeakMap<
+  ComponentType,
+  ReactElement
+>()
 
 async function createComponentTreeInternal(
   {
@@ -519,6 +528,93 @@ async function createComponentTreeInternal(
     tree,
   })
 
+  // Hoist loop-invariant computations out of the parallel routes loop.
+  // These depend only on the current segment (tree, dir, Template, etc.),
+  // not on parallelRouteKey, so they are identical for every iteration.
+
+  // Cache the RenderFromTemplateContext element across requests — it's always
+  // the same immutable React element (no props, no children).
+  let renderFromTemplateElement = renderFromTemplateElementCache.get(
+    RenderFromTemplateContext
+  )
+  if (!renderFromTemplateElement) {
+    renderFromTemplateElement = createElement(RenderFromTemplateContext, null)
+    renderFromTemplateElementCache.set(
+      RenderFromTemplateContext,
+      renderFromTemplateElement
+    )
+  }
+
+  const templateNode = createElement(
+    Template,
+    null,
+    renderFromTemplateElement
+  )
+
+  const templateFilePath = getConventionPathByType(tree, dir, 'template')
+  const errorFilePath = getConventionPathByType(tree, dir, 'error')
+  const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
+  const globalErrorFilePath = isRoot
+    ? getConventionPathByType(tree, dir, 'global-error')
+    : undefined
+
+  const wrappedErrorStyles =
+    isSegmentViewEnabled && errorFilePath
+      ? createElement(
+          SegmentViewNode,
+          {
+            type: 'error',
+            pagePath: errorFilePath,
+          },
+          errorStyles
+        )
+      : errorStyles
+
+  // Add a suffix to avoid conflict with the segment view node representing rendered file.
+  // existence: not-found.tsx@boundary
+  // rendered: not-found.tsx
+  const fileNameSuffix = BOUNDARY_SUFFIX
+  const segmentViewBoundaries = isSegmentViewEnabled
+    ? createElement(
+        Fragment,
+        null,
+        notFoundFilePath &&
+          createElement(SegmentViewNode, {
+            type: `${BOUNDARY_PREFIX}not-found`,
+            pagePath: notFoundFilePath + fileNameSuffix,
+          }),
+        loadingFilePath &&
+          createElement(SegmentViewNode, {
+            type: `${BOUNDARY_PREFIX}loading`,
+            pagePath: loadingFilePath + fileNameSuffix,
+          }),
+        errorFilePath &&
+          createElement(SegmentViewNode, {
+            type: `${BOUNDARY_PREFIX}error`,
+            pagePath: errorFilePath + fileNameSuffix,
+          }),
+        globalErrorFilePath &&
+          createElement(SegmentViewNode, {
+            type: `${BOUNDARY_PREFIX}global-error`,
+            pagePath: isNextjsBuiltinFilePath(globalErrorFilePath)
+              ? `${BUILTIN_PREFIX}global-error.js${fileNameSuffix}`
+              : globalErrorFilePath,
+          })
+      )
+    : null
+
+  const resolvedTemplateForRouter =
+    isSegmentViewEnabled && templateFilePath
+      ? createElement(
+          SegmentViewNode,
+          {
+            type: 'template',
+            pagePath: templateFilePath,
+          },
+          templateNode
+        )
+      : templateNode
+
   // TODO: Combine this `map` traversal with the loop below that turns the array
   // into an object.
   const parallelRouteMap = await Promise.all(
@@ -619,102 +715,23 @@ async function createComponentTreeInternal(
           childCacheNodeSeedData = seedData
         }
 
-        const templateNode = createElement(
-          Template,
-          null,
-          createElement(RenderFromTemplateContext, null)
-        )
-
-        const templateFilePath = getConventionPathByType(tree, dir, 'template')
-        const errorFilePath = getConventionPathByType(tree, dir, 'error')
-        const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
-        const globalErrorFilePath = isRoot
-          ? getConventionPathByType(tree, dir, 'global-error')
-          : undefined
-
-        const wrappedErrorStyles =
-          isSegmentViewEnabled && errorFilePath
-            ? createElement(
-                SegmentViewNode,
-                {
-                  type: 'error',
-                  pagePath: errorFilePath,
-                },
-                errorStyles
-              )
-            : errorStyles
-
-        // Add a suffix to avoid conflict with the segment view node representing rendered file.
-        // existence: not-found.tsx@boundary
-        // rendered: not-found.tsx
-        const fileNameSuffix = BOUNDARY_SUFFIX
-        const segmentViewBoundaries = isSegmentViewEnabled
-          ? createElement(
-              Fragment,
-              null,
-              notFoundFilePath &&
-                createElement(SegmentViewNode, {
-                  type: `${BOUNDARY_PREFIX}not-found`,
-                  pagePath: notFoundFilePath + fileNameSuffix,
-                }),
-              loadingFilePath &&
-                createElement(SegmentViewNode, {
-                  type: `${BOUNDARY_PREFIX}loading`,
-                  pagePath: loadingFilePath + fileNameSuffix,
-                }),
-              errorFilePath &&
-                createElement(SegmentViewNode, {
-                  type: `${BOUNDARY_PREFIX}error`,
-                  pagePath: errorFilePath + fileNameSuffix,
-                }),
-              globalErrorFilePath &&
-                createElement(SegmentViewNode, {
-                  type: `${BOUNDARY_PREFIX}global-error`,
-                  pagePath: isNextjsBuiltinFilePath(globalErrorFilePath)
-                    ? `${BUILTIN_PREFIX}global-error.js${fileNameSuffix}`
-                    : globalErrorFilePath,
-                })
-            )
-          : null
-
-        // Build LayoutRouter props conditionally to avoid serializing
-        // undefined values as "$undefined" in the RSC Flight payload.
-        // For a 10-layout route this eliminates ~100 redundant
-        // "$undefined" references (~1.4 KB savings per response).
-        const layoutRouterProps: Record<string, unknown> = {
-          parallelRouterKey: parallelRouteKey,
-          template:
-            isSegmentViewEnabled && templateFilePath
-              ? createElement(
-                  SegmentViewNode,
-                  {
-                    type: 'template',
-                    pagePath: templateFilePath,
-                  },
-                  templateNode
-                )
-              : templateNode,
-        }
-        if (ErrorComponent) layoutRouterProps.error = ErrorComponent
-        if (wrappedErrorStyles)
-          layoutRouterProps.errorStyles = wrappedErrorStyles
-        if (errorScripts) layoutRouterProps.errorScripts = errorScripts
-        if (templateStyles) layoutRouterProps.templateStyles = templateStyles
-        if (templateScripts)
-          layoutRouterProps.templateScripts = templateScripts
-        if (notFoundComponent)
-          layoutRouterProps.notFound = notFoundComponent
-        if (forbiddenComponent)
-          layoutRouterProps.forbidden = forbiddenComponent
-        if (unauthorizedComponent)
-          layoutRouterProps.unauthorized = unauthorizedComponent
-        if (isSegmentViewEnabled) {
-          layoutRouterProps.segmentViewBoundaries = segmentViewBoundaries
-        }
-
         return [
           parallelRouteKey,
-          createElement(LayoutRouter, layoutRouterProps),
+          createElement(LayoutRouter, {
+            parallelRouterKey: parallelRouteKey,
+            error: ErrorComponent,
+            errorStyles: wrappedErrorStyles,
+            errorScripts: errorScripts,
+            template: resolvedTemplateForRouter,
+            templateStyles: templateStyles,
+            templateScripts: templateScripts,
+            notFound: notFoundComponent,
+            forbidden: forbiddenComponent,
+            unauthorized: unauthorizedComponent,
+            ...(isSegmentViewEnabled && {
+              segmentViewBoundaries,
+            }),
+          }),
           childCacheNodeSeedData,
         ]
       }
@@ -737,7 +754,7 @@ async function createComponentTreeInternal(
         key: 'l',
       })
     : null
-  const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
+  // loadingFilePath is already computed above (hoisted out of the parallel routes loop)
   if (isSegmentViewEnabled && loadingElement) {
     if (loadingFilePath) {
       loadingElement = createElement(
