@@ -7,34 +7,21 @@
 
 ## Benchmark Results
 
-**Setup:** Node.js v25.7.0, autocannon, bench/app-router-server with minimal-server (minimalMode: true)
+**Setup:** Node.js v25.7.0, autocannon (10s duration, 3s warmup), bench/app-router-server with minimal-server (minimalMode: true). Both branches built with `rm -rf packages/next/dist && pnpm --filter=next build`. Same machine, same routes, same app, measured back-to-back.
 
-### Static Route (`/rsc` — pre-rendered `<div>hello</div>`)
-
-| Concurrency | Canary Baseline | This Branch | Improvement |
-|---|---|---|---|
-| c=1 | 5,219 req/s | 7,184 req/s | **+37.7%** |
-| c=50 | 5,939 req/s | 9,121 req/s | **+53.6%** |
-
-### Dynamic Route (`/deep/` — 10 nested layouts, `headers()`, 10 dynamic params)
+### Static Route (`/rsc` — pre-rendered `<div>hello</div>`, root layout only)
 
 | Concurrency | Canary Baseline | This Branch | Improvement |
 |---|---|---|---|
-| c=1 | 598 req/s, 1.09ms | 705 req/s, 1.07ms | **+17.9%, -38% latency** |
-| c=50 | 618 req/s, 79.9ms | 743 req/s, 66.6ms | **+20.2%, -16.6% latency** |
+| c=1 | 5,222 req/s | 7,319 req/s | **+40.2%** |
+| c=50 | 5,925 req/s | 9,119 req/s | **+53.9%** |
 
-### Bare Dynamic Page (`/bare` — root layout + `<div>hello</div>`, force-dynamic)
+### Dynamic Route (`/deep/a/b/.../j` — 10 nested layouts, `headers()`, 10 dynamic params, force-dynamic)
 
-| Concurrency | Result |
-|---|---|
-| c=1 | 1,031 req/s, 0.97ms |
-| c=50 | 1,165 req/s, 42ms |
-
-### Reference: Bare HTTP server (same content, no framework)
-
-| Concurrency | Result |
-|---|---|
-| c=50 | 49,533 req/s |
+| Concurrency | Canary Baseline | This Branch | Improvement |
+|---|---|---|---|
+| c=1 | 604 req/s, 1.08ms | 685 req/s, 1.07ms | **+13.4%** |
+| c=50 | 634 req/s, 78.1ms | 731 req/s, 67.7ms | **+15.3%, -13.3% latency** |
 
 ---
 
