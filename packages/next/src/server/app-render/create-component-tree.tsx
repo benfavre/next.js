@@ -1,4 +1,4 @@
-import type { ComponentType, ReactElement } from 'react'
+import type { ComponentType } from 'react'
 import type {
   CacheNodeSeedData,
   LoadingModuleData,
@@ -45,6 +45,86 @@ import type { AppSegmentConfig } from '../../build/segment-config/app/app-segmen
 import { RenderStage, type StagedRenderingController } from './staged-rendering'
 
 /**
+ * A Set wrapper that defers copying its parent until the first mutation.
+ * Reads (has, size, forEach, iteration) delegate to the parent Set.
+ * On the first add() or delete(), it copies the parent into a real Set and
+ * switches all subsequent operations to that copy.
+ *
+ * This avoids O(n) Set copy costs in the common case where a layout level
+ * has no CSS/JS/fonts to inject — which is typical for most intermediate
+ * segments in a layout tree. For a tree with 5+ segments and parallel
+ * routes, this can eliminate 30+ unnecessary Set allocations per request.
+ */
+class CopyOnWriteSet<T> {
+  private _parent: Set<T>
+  private _own: Set<T> | null
+
+  constructor(parent: Set<T>) {
+    this._parent = parent
+    this._own = null
+  }
+
+  private _materialize(): Set<T> {
+    if (this._own === null) {
+      this._own = new Set(this._parent)
+    }
+    return this._own
+  }
+
+  private _current(): Set<T> {
+    return this._own ?? this._parent
+  }
+
+  get size(): number {
+    return this._current().size
+  }
+
+  has(value: T): boolean {
+    return this._current().has(value)
+  }
+
+  add(value: T): this {
+    this._materialize().add(value)
+    return this
+  }
+
+  delete(value: T): boolean {
+    return this._materialize().delete(value)
+  }
+
+  clear(): void {
+    this._materialize().clear()
+  }
+
+  forEach(
+    callbackfn: (value: T, value2: T, set: Set<T>) => void,
+    thisArg?: any
+  ): void {
+    this._current().forEach(callbackfn, thisArg)
+  }
+
+  entries(): SetIterator<[T, T]> {
+    return this._current().entries()
+  }
+
+  keys(): SetIterator<T> {
+    return this._current().keys()
+  }
+
+  values(): SetIterator<T> {
+    return this._current().values()
+  }
+
+  [Symbol.iterator](): SetIterator<T> {
+    return this._current()[Symbol.iterator]()
+  }
+
+  get [Symbol.toStringTag](): string {
+    return 'CopyOnWriteSet'
+  }
+}
+
+/**
  * Use the provided loader tree to create the React Component tree.
  */
 // TODO convert these arguments to non-object form. the entrypoint doesn't need most of them
@@ -83,15 +163,6 @@ function errorMissingDefaultExport(
 }
 
 const cacheNodeKey = 'c'
-
-// Cache for createElement(RenderFromTemplateContext, null) — the result is always
-// the same immutable React element (no props, no children) so we avoid creating
-// identical objects on every segment × every request. Keyed on the component
-// reference so different bundles (edge vs node) stay isolated.
-const renderFromTemplateElementCache = new WeakMap<
-  ComponentType,
-  ReactElement
->()
 
 async function createComponentTreeInternal(
   {
@@ -163,11 +234,15 @@ async function createComponentTreeInternal(
     unauthorized,
   } = modules
 
-  const injectedCSSWithCurrentLayout = new Set(injectedCSS)
-  const injectedJSWithCurrentLayout = new Set(injectedJS)
-  const injectedFontPreloadTagsWithCurrentLayout = new Set(
+  const injectedCSSWithCurrentLayout = new CopyOnWriteSet(
+    injectedCSS
+  ) as Set<string>
+  const injectedJSWithCurrentLayout = new CopyOnWriteSet(
+    injectedJS
+  ) as Set<string>
+  const injectedFontPreloadTagsWithCurrentLayout = new CopyOnWriteSet(
     injectedFontPreloadTags
-  )
+  ) as Set<string>
 
   const layerAssets = getLayerAssets({
     preloadCallbacks,
@@ -344,7 +419,6 @@ async function createComponentTreeInternal(
         case 'prerender-client':
         case 'validation-client':
         case 'unstable-cache':
-        case 'generate-static-params':
           break
         default:
           workUnitStore satisfies never
@@ -363,48 +437,6 @@ async function createComponentTreeInternal(
       workStore.dynamicUsageDescription = dynamicUsageDescription
 
       throw new DynamicServerError(dynamicUsageDescription)
-    }
-  }
-
-  // Read unstable_dynamicStaleTime from page modules (not layouts) and track it on
-  // the store's stale field. This affects the segment cache stale time via
-  // the StaleTimeIterable.
-  if (
-    isPage &&
-    typeof layoutOrPageMod?.unstable_dynamicStaleTime === 'number'
-  ) {
-    const pageStaleTime = layoutOrPageMod.unstable_dynamicStaleTime
-    const workUnitStore = workUnitAsyncStorage.getStore()
-
-    if (workUnitStore) {
-      switch (workUnitStore.type) {
-        case 'prerender':
-        case 'prerender-runtime':
-        case 'prerender-legacy':
-        case 'prerender-ppr':
-          if (workUnitStore.stale > pageStaleTime) {
-            workUnitStore.stale = pageStaleTime
-          }
-          break
-        case 'request':
-          if (
-            workUnitStore.stale === undefined ||
-            workUnitStore.stale > pageStaleTime
-          ) {
-            workUnitStore.stale = pageStaleTime
-          }
-          break
-        // createComponentTree is not called for these stores:
-        case 'cache':
-        case 'private-cache':
-        case 'prerender-client':
-        case 'validation-client':
-        case 'unstable-cache':
-        case 'generate-static-params':
-          break
-        default:
-          workUnitStore satisfies never
-      }
     }
   }
 
@@ -528,93 +560,6 @@ async function createComponentTreeInternal(
     tree,
   })
 
-  // Hoist loop-invariant computations out of the parallel routes loop.
-  // These depend only on the current segment (tree, dir, Template, etc.),
-  // not on parallelRouteKey, so they are identical for every iteration.
-
-  // Cache the RenderFromTemplateContext element across requests — it's always
-  // the same immutable React element (no props, no children).
-  let renderFromTemplateElement = renderFromTemplateElementCache.get(
-    RenderFromTemplateContext
-  )
-  if (!renderFromTemplateElement) {
-    renderFromTemplateElement = createElement(RenderFromTemplateContext, null)
-    renderFromTemplateElementCache.set(
-      RenderFromTemplateContext,
-      renderFromTemplateElement
-    )
-  }
-
-  const templateNode = createElement(
-    Template,
-    null,
-    renderFromTemplateElement
-  )
-
-  const templateFilePath = getConventionPathByType(tree, dir, 'template')
-  const errorFilePath = getConventionPathByType(tree, dir, 'error')
-  const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
-  const globalErrorFilePath = isRoot
-    ? getConventionPathByType(tree, dir, 'global-error')
-    : undefined
-
-  const wrappedErrorStyles =
-    isSegmentViewEnabled && errorFilePath
-      ? createElement(
-          SegmentViewNode,
-          {
-            type: 'error',
-            pagePath: errorFilePath,
-          },
-          errorStyles
-        )
-      : errorStyles
-
-  // Add a suffix to avoid conflict with the segment view node representing rendered file.
-  // existence: not-found.tsx@boundary
-  // rendered: not-found.tsx
-  const fileNameSuffix = BOUNDARY_SUFFIX
-  const segmentViewBoundaries = isSegmentViewEnabled
-    ? createElement(
-        Fragment,
-        null,
-        notFoundFilePath &&
-          createElement(SegmentViewNode, {
-            type: `${BOUNDARY_PREFIX}not-found`,
-            pagePath: notFoundFilePath + fileNameSuffix,
-          }),
-        loadingFilePath &&
-          createElement(SegmentViewNode, {
-            type: `${BOUNDARY_PREFIX}loading`,
-            pagePath: loadingFilePath + fileNameSuffix,
-          }),
-        errorFilePath &&
-          createElement(SegmentViewNode, {
-            type: `${BOUNDARY_PREFIX}error`,
-            pagePath: errorFilePath + fileNameSuffix,
-          }),
-        globalErrorFilePath &&
-          createElement(SegmentViewNode, {
-            type: `${BOUNDARY_PREFIX}global-error`,
-            pagePath: isNextjsBuiltinFilePath(globalErrorFilePath)
-              ? `${BUILTIN_PREFIX}global-error.js${fileNameSuffix}`
-              : globalErrorFilePath,
-          })
-      )
-    : null
-
-  const resolvedTemplateForRouter =
-    isSegmentViewEnabled && templateFilePath
-      ? createElement(
-          SegmentViewNode,
-          {
-            type: 'template',
-            pagePath: templateFilePath,
-          },
-          templateNode
-        )
-      : templateNode
-
   // TODO: Combine this `map` traversal with the loop below that turns the array
   // into an object.
   const parallelRouteMap = await Promise.all(
@@ -715,6 +660,64 @@ async function createComponentTreeInternal(
           childCacheNodeSeedData = seedData
         }
 
+        const templateNode = createElement(
+          Template,
+          null,
+          createElement(RenderFromTemplateContext, null)
+        )
+
+        const templateFilePath = getConventionPathByType(tree, dir, 'template')
+        const errorFilePath = getConventionPathByType(tree, dir, 'error')
+        const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
+        const globalErrorFilePath = isRoot
+          ? getConventionPathByType(tree, dir, 'global-error')
+          : undefined
+
+        const wrappedErrorStyles =
+          isSegmentViewEnabled && errorFilePath
+            ? createElement(
+                SegmentViewNode,
+                {
+                  type: 'error',
+                  pagePath: errorFilePath,
+                },
+                errorStyles
+              )
+            : errorStyles
+
+        // Add a suffix to avoid conflict with the segment view node representing rendered file.
+        // existence: not-found.tsx@boundary
+        // rendered: not-found.tsx
+        const fileNameSuffix = BOUNDARY_SUFFIX
+        const segmentViewBoundaries = isSegmentViewEnabled
+          ? createElement(
+              Fragment,
+              null,
+              notFoundFilePath &&
+                createElement(SegmentViewNode, {
+                  type: `${BOUNDARY_PREFIX}not-found`,
+                  pagePath: notFoundFilePath + fileNameSuffix,
+                }),
+              loadingFilePath &&
+                createElement(SegmentViewNode, {
+                  type: `${BOUNDARY_PREFIX}loading`,
+                  pagePath: loadingFilePath + fileNameSuffix,
+                }),
+              errorFilePath &&
+                createElement(SegmentViewNode, {
+                  type: `${BOUNDARY_PREFIX}error`,
+                  pagePath: errorFilePath + fileNameSuffix,
+                }),
+              globalErrorFilePath &&
+                createElement(SegmentViewNode, {
+                  type: `${BOUNDARY_PREFIX}global-error`,
+                  pagePath: isNextjsBuiltinFilePath(globalErrorFilePath)
+                    ? `${BUILTIN_PREFIX}global-error.js${fileNameSuffix}`
+                    : globalErrorFilePath,
+                })
+            )
+          : null
+
         return [
           parallelRouteKey,
           createElement(LayoutRouter, {
@@ -722,7 +725,17 @@ async function createComponentTreeInternal(
             error: ErrorComponent,
             errorStyles: wrappedErrorStyles,
             errorScripts: errorScripts,
-            template: resolvedTemplateForRouter,
+            template:
+              isSegmentViewEnabled && templateFilePath
+                ? createElement(
+                    SegmentViewNode,
+                    {
+                      type: 'template',
+                      pagePath: templateFilePath,
+                    },
+                    templateNode
+                  )
+                : templateNode,
             templateStyles: templateStyles,
             templateScripts: templateScripts,
             notFound: notFoundComponent,
@@ -754,7 +767,7 @@ async function createComponentTreeInternal(
         key: 'l',
       })
     : null
-  // loadingFilePath is already computed above (hoisted out of the parallel routes loop)
+  const loadingFilePath = getConventionPathByType(tree, dir, 'loading')
   if (isSegmentViewEnabled && loadingElement) {
     if (loadingFilePath) {
       loadingElement = createElement(
@@ -1361,7 +1374,6 @@ function createSeedData(
         case 'cache':
         case 'private-cache':
         case 'unstable-cache':
-        case 'generate-static-params':
           break
         default:
           workUnitStore satisfies never
