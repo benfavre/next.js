@@ -337,7 +337,7 @@ class NextTracerImpl implements NextTracer {
     // span counter increments) on every traced call.
     // Only bypass when not forcing — force mode needs context extraction
     // even without a real tracer, for propagation correctness.
-    if (!force && this.isNoopTracer()) {
+    if (this.isNoopTracer()) {
       return fn()
     }
 
@@ -483,7 +483,7 @@ class NextTracerImpl implements NextTracer {
 
     // Only bypass when not forcing — force mode needs context extraction
     // even without a real tracer, for propagation correctness.
-    if (!force && this.isNoopTracer()) {
+    if (this.isNoopTracer()) {
       return fn
     }
 
@@ -547,7 +547,7 @@ class NextTracerImpl implements NextTracer {
   public withSpan<T>(span: Span, fn: () => T): T {
     // Only bypass when not forcing — force mode needs context extraction
     // even without a real tracer, for propagation correctness.
-    if (!force && this.isNoopTracer()) {
+    if (this.isNoopTracer()) {
       return fn()
     }
     const spanContext = trace.setSpan(context.active(), span)

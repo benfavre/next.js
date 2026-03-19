@@ -216,7 +216,7 @@ export function createCapturingResponse(
         chunks.push(Buffer.from(chunk))
       }
     }
-    return origWrite(...args)
+    return origWrite.apply(res, args as any)
   }
 
   res.end = function (
@@ -256,7 +256,7 @@ export function createCapturingResponse(
       })
     }
 
-    return origEnd(...args)
+    return origEnd.apply(res, args as any)
   }
 
   return res
